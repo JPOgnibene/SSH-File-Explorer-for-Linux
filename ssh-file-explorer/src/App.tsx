@@ -190,22 +190,13 @@ function App() {
   if (!connected) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
-        <div className="w-full max-w-md">
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-emerald-500/10 mb-4">
-              <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M12 5l7 7-7 7" />
-              </svg>
-            </div>
-            <h1 className="text-2xl font-semibold text-white">SSH File Explorer</h1>
-            <p className="text-zinc-500 mt-1">Connect to a remote Linux machine</p>
-          </div>
+        <div className={`flex items-stretch gap-6 w-full ${savedConnections.length > 0 ? "max-w-3xl" : "max-w-md"}`}>
 
-          {/* Saved connections */}
+          {/* Saved connections panel */}
           {savedConnections.length > 0 && (
-            <div className="mb-6">
-              <p className="text-xs font-medium text-zinc-400 mb-2">Saved Connections</p>
-              <div className="space-y-1.5">
+            <div className="w-72 shrink-0 flex flex-col min-h-0">
+              <p className="text-xs font-medium text-zinc-400 mb-2 shrink-0">Saved Connections</p>
+              <div className="flex-1 overflow-y-auto min-h-0 max-h-[420px] space-y-1.5 pr-1">
                 {savedConnections.map((conn) => (
                   <button
                     key={conn.id}
@@ -236,77 +227,84 @@ function App() {
                   </button>
                 ))}
               </div>
-
-              <div className="flex items-center gap-3 my-5">
-                <div className="flex-1 h-px bg-zinc-800" />
-                <span className="text-xs text-zinc-600">or connect manually</span>
-                <div className="flex-1 h-px bg-zinc-800" />
-              </div>
             </div>
           )}
 
-          <form onSubmit={handleConnect} className="space-y-4">
-            <div className="flex gap-3">
-              <div className="flex-1">
-                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Host</label>
+          {/* Login form */}
+          <div className="flex-1 max-w-md">
+            <div className="text-center mb-8">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-emerald-500/10 mb-4">
+                <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
+              </div>
+              <h1 className="text-2xl font-semibold text-white">SSH File Explorer</h1>
+              <p className="text-zinc-500 mt-1">Connect to a remote Linux machine</p>
+            </div>
+
+            <form onSubmit={handleConnect} className="space-y-4">
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className="block text-xs font-medium text-zinc-400 mb-1.5">Host</label>
+                  <input
+                    type="text"
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    placeholder="192.168.1.100"
+                    required
+                    className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
+                  />
+                </div>
+                <div className="w-24">
+                  <label className="block text-xs font-medium text-zinc-400 mb-1.5">Port</label>
+                  <input
+                    type="text"
+                    value={port}
+                    onChange={(e) => setPort(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Username</label>
                 <input
                   type="text"
-                  value={host}
-                  onChange={(e) => setHost(e.target.value)}
-                  placeholder="192.168.1.100"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="root"
                   required
                   className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
                 />
               </div>
-              <div className="w-24">
-                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Port</label>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Password</label>
                 <input
-                  type="text"
-                  value={port}
-                  onChange={(e) => setPort(e.target.value)}
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
                   className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
                 />
               </div>
-            </div>
 
-            <div>
-              <label className="block text-xs font-medium text-zinc-400 mb-1.5">Username</label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="root"
-                required
-                className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
-              />
-            </div>
+              {error && (
+                <div className="px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+                  {error}
+                </div>
+              )}
 
-            <div>
-              <label className="block text-xs font-medium text-zinc-400 mb-1.5">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
-              />
-            </div>
-
-            {error && (
-              <div className="px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
-                {error}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={connecting}
-              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-white font-medium transition cursor-pointer"
-            >
-              {connecting ? "Connecting..." : "Connect"}
-            </button>
-          </form>
+              <button
+                type="submit"
+                disabled={connecting}
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-white font-medium transition cursor-pointer"
+              >
+                {connecting ? "Connecting..." : "Connect"}
+              </button>
+            </form>
+          </div>
         </div>
       </div>
     );
