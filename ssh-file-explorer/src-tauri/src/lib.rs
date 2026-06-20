@@ -82,10 +82,15 @@ async fn save_connection(
     password: Option<String>,
 ) -> Result<(), String> {
     let mut connections = read_connections(&app)?;
+
+    let existing = connections.iter_mut().find(|c| {
+        c.id == id || (c.host == host && c.port == port && c.username == username)
+    });
+
     let conn = SavedConnection { id: id.clone(), label, host, port, username, password };
 
-    if let Some(existing) = connections.iter_mut().find(|c| c.id == id) {
-        *existing = conn;
+    if let Some(entry) = existing {
+        *entry = conn;
     } else {
         connections.push(conn);
     }
