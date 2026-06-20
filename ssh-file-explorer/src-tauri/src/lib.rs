@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use russh::*;
-use serde::Serialize;
-use tauri::State;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, State};
 
 struct SshState {
     session: Option<russh::client::Handle<ClientHandler>>,
@@ -21,6 +21,16 @@ impl russh::client::Handler for ClientHandler {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct SavedConnection {
+    id: String,
+    label: String,
+    host: String,
+    port: u16,
+    username: String,
+    password: Option<String>,
+}
+
 #[derive(Serialize)]
 struct FileEntry {
     name: String,
@@ -31,6 +41,64 @@ struct FileEntry {
 }
 
 type SshSession = Arc<Mutex<SshState>>;
+
+fn connections_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Failed to get config dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    Ok(dir.join("connections.json"))
+}
+
+fn read_connections(app: &AppHandle) -> Result<Vec<SavedConnection>, String> {
+    let path = connections_path(app)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = std::fs::read_to_string(&path).map_err(|e| format!("Failed to read connections: {}", e))?;
+    serde_json::from_str(&data).map_err(|e| format!("Failed to parse connections: {}", e))
+}
+
+fn write_connections(app: &AppHandle, connections: &[SavedConnection]) -> Result<(), String> {
+    let path = connections_path(app)?;
+    let data = serde_json::to_string_pretty(connections).map_err(|e| format!("Failed to serialize: {}", e))?;
+    std::fs::write(&path, data).map_err(|e| format!("Failed to write connections: {}", e))
+}
+
+#[tauri::command]
+async fn get_saved_connections(app: AppHandle) -> Result<Vec<SavedConnection>, String> {
+    read_connections(&app)
+}
+
+#[tauri::command]
+async fn save_connection(
+    app: AppHandle,
+    id: String,
+    label: String,
+    host: String,
+    port: u16,
+    username: String,
+    password: Option<String>,
+) -> Result<(), String> {
+    let mut connections = read_connections(&app)?;
+    let conn = SavedConnection { id: id.clone(), label, host, port, username, password };
+
+    if let Some(existing) = connections.iter_mut().find(|c| c.id == id) {
+        *existing = conn;
+    } else {
+        connections.push(conn);
+    }
+
+    write_connections(&app, &connections)
+}
+
+#[tauri::command]
+async fn delete_connection(app: AppHandle, id: String) -> Result<(), String> {
+    let mut connections = read_connections(&app)?;
+    connections.retain(|c| c.id != id);
+    write_connections(&app, &connections)
+}
 
 #[tauri::command]
 async fn ssh_connect(
@@ -199,6 +267,9 @@ pub fn run() {
             ssh_connect,
             ssh_disconnect,
             list_directory,
+            get_saved_connections,
+            save_connection,
+            delete_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
