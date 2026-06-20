@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -8,6 +8,15 @@ interface FileEntry {
   size: number;
   modified: string;
   permissions: string;
+}
+
+interface SavedConnection {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string | null;
 }
 
 function formatSize(bytes: number): string {
@@ -41,10 +50,26 @@ function App() {
   const [port, setPort] = useState("22");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [savePassword, setSavePassword] = useState(true);
 
   const [currentPath, setCurrentPath] = useState("/");
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
+
+  const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([]);
+  const [showSaveForm, setShowSaveForm] = useState(false);
+  const [saveLabel, setSaveLabel] = useState("");
+
+  useEffect(() => {
+    loadSavedConnections();
+  }, []);
+
+  const loadSavedConnections = async () => {
+    try {
+      const conns: SavedConnection[] = await invoke("get_saved_connections");
+      setSavedConnections(conns);
+    } catch (_) {}
+  };
 
   const listFiles = useCallback(async (path: string) => {
     setLoading(true);
@@ -64,23 +89,68 @@ function App() {
     }
   }, []);
 
-  const handleConnect = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const doConnect = async (h: string, p: number, u: string, pw: string) => {
     setConnecting(true);
     setError("");
     try {
-      await invoke("ssh_connect", {
-        host,
-        port: parseInt(port),
-        username,
-        password,
-      });
+      await invoke("ssh_connect", { host: h, port: p, username: u, password: pw });
+      setHost(h);
+      setPort(String(p));
+      setUsername(u);
+      setPassword(pw);
       setConnected(true);
       await listFiles("/");
     } catch (e) {
       setError(String(e));
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const handleConnect = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await doConnect(host, parseInt(port), username, password);
+  };
+
+  const handleSavedConnect = async (conn: SavedConnection) => {
+    if (conn.password) {
+      await doConnect(conn.host, conn.port, conn.username, conn.password);
+    } else {
+      setHost(conn.host);
+      setPort(String(conn.port));
+      setUsername(conn.username);
+      setPassword("");
+      setError("Enter password for this connection");
+    }
+  };
+
+  const handleSaveConnection = async () => {
+    if (!saveLabel.trim()) return;
+    const id = crypto.randomUUID();
+    try {
+      await invoke("save_connection", {
+        id,
+        label: saveLabel.trim(),
+        host,
+        port: parseInt(port),
+        username,
+        password: savePassword ? password : null,
+      });
+      await loadSavedConnections();
+      setShowSaveForm(false);
+      setSaveLabel("");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleDeleteConnection = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    try {
+      await invoke("delete_connection", { id });
+      await loadSavedConnections();
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -120,79 +190,121 @@ function App() {
   if (!connected) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
-        <div className="w-full max-w-md">
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-emerald-500/10 mb-4">
-              <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M12 5l7 7-7 7" />
-              </svg>
-            </div>
-            <h1 className="text-2xl font-semibold text-white">SSH File Explorer</h1>
-            <p className="text-zinc-500 mt-1">Connect to a remote Linux machine</p>
-          </div>
+        <div className={`flex items-stretch gap-6 w-full ${savedConnections.length > 0 ? "max-w-3xl" : "max-w-md"}`}>
 
-          <form onSubmit={handleConnect} className="space-y-4">
-            <div className="flex gap-3">
-              <div className="flex-1">
-                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Host</label>
+          {/* Saved connections panel */}
+          {savedConnections.length > 0 && (
+            <div className="w-72 shrink-0 flex flex-col min-h-0">
+              <p className="text-xs font-medium text-zinc-400 mb-2 shrink-0">Saved Connections</p>
+              <div className="flex-1 overflow-y-auto min-h-0 max-h-[420px] space-y-1.5 pr-1">
+                {savedConnections.map((conn) => (
+                  <button
+                    key={conn.id}
+                    onClick={() => handleSavedConnect(conn)}
+                    disabled={connecting}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg hover:border-emerald-500/40 hover:bg-zinc-900/80 transition group disabled:opacity-50 cursor-pointer"
+                  >
+                    <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center shrink-0">
+                      <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
+                      </svg>
+                    </div>
+                    <div className="flex-1 text-left min-w-0">
+                      <div className="text-sm text-white font-medium truncate">{conn.label}</div>
+                      <div className="text-xs text-zinc-500 truncate">
+                        {conn.username}@{conn.host}:{conn.port}
+                        {!conn.password && " (password required)"}
+                      </div>
+                    </div>
+                    <div
+                      onClick={(e) => handleDeleteConnection(e, conn.id)}
+                      className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+                    >
+                      <svg className="w-3.5 h-3.5 text-zinc-400 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Login form */}
+          <div className="flex-1 max-w-md">
+            <div className="text-center mb-8">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-emerald-500/10 mb-4">
+                <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
+              </div>
+              <h1 className="text-2xl font-semibold text-white">SSH File Explorer</h1>
+              <p className="text-zinc-500 mt-1">Connect to a remote Linux machine</p>
+            </div>
+
+            <form onSubmit={handleConnect} className="space-y-4">
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className="block text-xs font-medium text-zinc-400 mb-1.5">Host</label>
+                  <input
+                    type="text"
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    placeholder="192.168.1.100"
+                    required
+                    className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
+                  />
+                </div>
+                <div className="w-24">
+                  <label className="block text-xs font-medium text-zinc-400 mb-1.5">Port</label>
+                  <input
+                    type="text"
+                    value={port}
+                    onChange={(e) => setPort(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Username</label>
                 <input
                   type="text"
-                  value={host}
-                  onChange={(e) => setHost(e.target.value)}
-                  placeholder="192.168.1.100"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="root"
                   required
                   className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
                 />
               </div>
-              <div className="w-24">
-                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Port</label>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Password</label>
                 <input
-                  type="text"
-                  value={port}
-                  onChange={(e) => setPort(e.target.value)}
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
                   className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
                 />
               </div>
-            </div>
 
-            <div>
-              <label className="block text-xs font-medium text-zinc-400 mb-1.5">Username</label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="root"
-                required
-                className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
-              />
-            </div>
+              {error && (
+                <div className="px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+                  {error}
+                </div>
+              )}
 
-            <div>
-              <label className="block text-xs font-medium text-zinc-400 mb-1.5">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
-              />
-            </div>
-
-            {error && (
-              <div className="px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
-                {error}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={connecting}
-              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-white font-medium transition cursor-pointer"
-            >
-              {connecting ? "Connecting..." : "Connect"}
-            </button>
-          </form>
+              <button
+                type="submit"
+                disabled={connecting}
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-white font-medium transition cursor-pointer"
+              >
+                {connecting ? "Connecting..." : "Connect"}
+              </button>
+            </form>
+          </div>
         </div>
       </div>
     );
@@ -228,6 +340,19 @@ function App() {
           ))}
         </div>
 
+        {/* Save connection button */}
+        {!showSaveForm && (
+          <button
+            onClick={() => {
+              setSaveLabel(`${username}@${host}`);
+              setShowSaveForm(true);
+            }}
+            className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          >
+            Save
+          </button>
+        )}
+
         <button
           onClick={handleDisconnect}
           className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
@@ -235,6 +360,46 @@ function App() {
           Disconnect
         </button>
       </div>
+
+      {/* Save connection inline form */}
+      {showSaveForm && (
+        <div className="flex items-center gap-2 px-4 py-2.5 bg-zinc-900/80 border-b border-zinc-800">
+          <span className="text-xs text-zinc-400 shrink-0">Save as:</span>
+          <input
+            type="text"
+            value={saveLabel}
+            onChange={(e) => setSaveLabel(e.target.value)}
+            placeholder="Connection name"
+            autoFocus
+            className="flex-1 px-2.5 py-1.5 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSaveConnection();
+              if (e.key === "Escape") setShowSaveForm(false);
+            }}
+          />
+          <label className="flex items-center gap-1.5 text-xs text-zinc-400 shrink-0 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={savePassword}
+              onChange={(e) => setSavePassword(e.target.checked)}
+              className="rounded border-zinc-600 accent-emerald-500"
+            />
+            Save password
+          </label>
+          <button
+            onClick={handleSaveConnection}
+            className="px-3 py-1.5 text-xs text-white bg-emerald-600 hover:bg-emerald-500 rounded-md transition cursor-pointer"
+          >
+            Save
+          </button>
+          <button
+            onClick={() => setShowSaveForm(false)}
+            className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white transition cursor-pointer"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="mx-4 mt-3 px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
