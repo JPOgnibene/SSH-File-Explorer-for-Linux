@@ -246,7 +246,8 @@ async fn write_file(path: String, content: String, state: State<'_, SshSession>)
 async fn create_file(path: String, state: State<'_, SshSession>) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let cmd = format!("touch {}", shell_escape(&path));
+    let escaped = shell_escape(&path);
+    let cmd = format!("mkdir -p \"$(dirname {})\" && touch {}", escaped, escaped);
     exec_ssh(session, &cmd).await?;
     Ok(())
 }
