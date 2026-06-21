@@ -103,6 +103,21 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!connected) return;
+    const interval = setInterval(async () => {
+      try {
+        const entries: FileEntry[] = await invoke("list_directory", { path: currentPath });
+        entries.sort((a, b) => {
+          if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        setFiles(entries);
+      } catch {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [connected, currentPath]);
+
+  useEffect(() => {
     if (!editingFile || !editorRef.current) return;
 
     if (editorViewRef.current) {
