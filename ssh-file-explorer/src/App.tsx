@@ -640,7 +640,7 @@ function App() {
             type="text"
             value={newDirName}
             onChange={(e) => setNewDirName(e.target.value)}
-            placeholder="folder-name"
+            placeholder="folder-name or path/to/folder"
             autoFocus
             className="flex-1 px-2.5 py-1.5 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition"
             onKeyDown={(e) => {
