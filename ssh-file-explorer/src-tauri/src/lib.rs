@@ -252,6 +252,15 @@ async fn create_file(path: String, state: State<'_, SshSession>) -> Result<(), S
 }
 
 #[tauri::command]
+async fn create_directory(path: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("mkdir -p {}", shell_escape(&path));
+    exec_ssh(session, &cmd).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn delete_file(path: String, is_dir: bool, state: State<'_, SshSession>) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
@@ -325,6 +334,7 @@ pub fn run() {
             read_file,
             write_file,
             create_file,
+            create_directory,
             delete_file,
             get_saved_connections,
             save_connection,

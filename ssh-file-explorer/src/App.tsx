@@ -96,6 +96,9 @@ function App() {
   const [showNewFileInput, setShowNewFileInput] = useState(false);
   const [newFileName, setNewFileName] = useState("");
 
+  const [showNewDirInput, setShowNewDirInput] = useState(false);
+  const [newDirName, setNewDirName] = useState("");
+
   const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
 
   useEffect(() => {
@@ -314,6 +317,23 @@ function App() {
     }
   };
 
+  const handleCreateDir = async () => {
+    if (!newDirName.trim()) return;
+    const dirPath =
+      currentPath === "/"
+        ? `/${newDirName.trim()}`
+        : `${currentPath}/${newDirName.trim()}`;
+    setError("");
+    try {
+      await invoke("create_directory", { path: dirPath });
+      setNewDirName("");
+      setShowNewDirInput(false);
+      await listFiles(currentPath);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const handleDeleteFile = async (file: FileEntry) => {
     const filePath =
       currentPath === "/"
@@ -510,6 +530,16 @@ function App() {
         >
           + New File
         </button>
+        <button
+          onClick={() => {
+            setShowNewDirInput(true);
+            setNewDirName("");
+          }}
+          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          title="New folder"
+        >
+          + New Folder
+        </button>
 
         {!showSaveForm && (
           <button
@@ -595,6 +625,37 @@ function App() {
           </button>
           <button
             onClick={() => setShowNewFileInput(false)}
+            className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white transition cursor-pointer"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* New folder inline input */}
+      {showNewDirInput && (
+        <div className="flex items-center gap-2 px-4 py-2.5 bg-zinc-900/80 border-b border-zinc-800">
+          <span className="text-xs text-zinc-400 shrink-0">New folder:</span>
+          <input
+            type="text"
+            value={newDirName}
+            onChange={(e) => setNewDirName(e.target.value)}
+            placeholder="folder-name"
+            autoFocus
+            className="flex-1 px-2.5 py-1.5 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleCreateDir();
+              if (e.key === "Escape") setShowNewDirInput(false);
+            }}
+          />
+          <button
+            onClick={handleCreateDir}
+            className="px-3 py-1.5 text-xs text-white bg-emerald-600 hover:bg-emerald-500 rounded-md transition cursor-pointer"
+          >
+            Create
+          </button>
+          <button
+            onClick={() => setShowNewDirInput(false)}
             className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white transition cursor-pointer"
           >
             Cancel
