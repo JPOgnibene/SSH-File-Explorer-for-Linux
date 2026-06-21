@@ -1,5 +1,16 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "@codemirror/view";
+import { EditorState } from "@codemirror/state";
+import { defaultKeymap, indentWithTab, history, historyKeymap } from "@codemirror/commands";
+import { oneDark } from "@codemirror/theme-one-dark";
+import { javascript } from "@codemirror/lang-javascript";
+import { python } from "@codemirror/lang-python";
+import { json } from "@codemirror/lang-json";
+import { html } from "@codemirror/lang-html";
+import { css } from "@codemirror/lang-css";
+import { xml } from "@codemirror/lang-xml";
+import { markdown } from "@codemirror/lang-markdown";
 import "./App.css";
 
 interface FileEntry {
@@ -24,6 +35,21 @@ function formatSize(bytes: number): string {
   const units = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function getLanguageExtension(filename: string) {
+  const ext = filename.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "js": case "jsx": case "ts": case "tsx": case "mjs": case "cjs":
+      return javascript({ jsx: true, typescript: ext?.includes("ts") });
+    case "py": return python();
+    case "json": return json();
+    case "html": case "htm": return html();
+    case "css": case "scss": case "less": return css();
+    case "xml": case "svg": case "xsl": return xml();
+    case "md": case "markdown": return markdown();
+    default: return [];
+  }
 }
 
 function FileIcon({ isDir }: { isDir: boolean }) {
@@ -60,9 +86,67 @@ function App() {
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [saveLabel, setSaveLabel] = useState("");
 
+  const [editingFile, setEditingFile] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState("");
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
+
+  const [showNewFileInput, setShowNewFileInput] = useState(false);
+  const [newFileName, setNewFileName] = useState("");
+
+  const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
+
   useEffect(() => {
     loadSavedConnections();
   }, []);
+
+  useEffect(() => {
+    if (!editingFile || !editorRef.current) return;
+
+    if (editorViewRef.current) {
+      editorViewRef.current.destroy();
+    }
+
+    const lang = getLanguageExtension(editingFile);
+
+    const state = EditorState.create({
+      doc: editingContent,
+      extensions: [
+        lineNumbers(),
+        highlightActiveLine(),
+        highlightActiveLineGutter(),
+        history(),
+        keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+        oneDark,
+        EditorView.theme({
+          "&": { height: "100%", fontSize: "13px" },
+          ".cm-scroller": { overflow: "auto" },
+          ".cm-content": { fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace" },
+          ".cm-gutters": { fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace" },
+        }),
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) {
+            setEditorDirty(true);
+          }
+        }),
+        ...(Array.isArray(lang) ? lang : [lang]),
+      ],
+    });
+
+    const view = new EditorView({
+      state,
+      parent: editorRef.current,
+    });
+
+    editorViewRef.current = view;
+
+    return () => {
+      view.destroy();
+      editorViewRef.current = null;
+    };
+  }, [editingFile, editingContent]);
 
   const loadSavedConnections = async () => {
     try {
@@ -162,15 +246,93 @@ function App() {
     setFiles([]);
     setCurrentPath("/");
     setError("");
+    closeEditor();
   };
 
-  const navigateTo = (entry: FileEntry) => {
-    if (!entry.is_dir) return;
-    const newPath =
+  const openFile = async (file: FileEntry) => {
+    if (file.is_dir) {
+      const newPath =
+        currentPath === "/"
+          ? `/${file.name}`
+          : `${currentPath}/${file.name}`;
+      listFiles(newPath);
+      return;
+    }
+
+    const filePath =
       currentPath === "/"
-        ? `/${entry.name}`
-        : `${currentPath}/${entry.name}`;
-    listFiles(newPath);
+        ? `/${file.name}`
+        : `${currentPath}/${file.name}`;
+
+    setError("");
+    try {
+      const content: string = await invoke("read_file", { path: filePath });
+      setEditingContent(content);
+      setEditingFile(filePath);
+      setEditorDirty(false);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const saveFile = async () => {
+    if (!editingFile || !editorViewRef.current) return;
+    setSaving(true);
+    setError("");
+    try {
+      const content = editorViewRef.current.state.doc.toString();
+      await invoke("write_file", { path: editingFile, content });
+      setEditorDirty(false);
+      await listFiles(currentPath);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const closeEditor = () => {
+    setEditingFile(null);
+    setEditingContent("");
+    setEditorDirty(false);
+  };
+
+  const handleCreateFile = async () => {
+    if (!newFileName.trim()) return;
+    const name = newFileName.trim();
+    const fullPath =
+      currentPath === "/" ? `/${name}` : `${currentPath}/${name}`;
+    setError("");
+    try {
+      if (name.endsWith("/")) {
+        await invoke("create_directory", { path: fullPath });
+      } else {
+        await invoke("create_file", { path: fullPath });
+      }
+      setNewFileName("");
+      setShowNewFileInput(false);
+      await listFiles(currentPath);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleDeleteFile = async (file: FileEntry) => {
+    const filePath =
+      currentPath === "/"
+        ? `/${file.name}`
+        : `${currentPath}/${file.name}`;
+    setError("");
+    try {
+      await invoke("delete_file", { path: filePath, isDir: file.is_dir });
+      setConfirmDelete(null);
+      if (editingFile === filePath) {
+        closeEditor();
+      }
+      await listFiles(currentPath);
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const navigateUp = () => {
@@ -340,7 +502,18 @@ function App() {
           ))}
         </div>
 
-        {/* Save connection button */}
+        {/* Action buttons */}
+        <button
+          onClick={() => {
+            setShowNewFileInput(true);
+            setNewFileName("");
+          }}
+          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          title="New file or folder"
+        >
+          + New File/Folder
+        </button>
+
         {!showSaveForm && (
           <button
             onClick={() => {
@@ -401,81 +574,205 @@ function App() {
         </div>
       )}
 
+      {/* New file inline input */}
+      {showNewFileInput && (
+        <div className="flex items-center gap-2 px-4 py-2.5 bg-zinc-900/80 border-b border-zinc-800">
+          <span className="text-xs text-zinc-400 shrink-0">New file/folder:</span>
+          <input
+            type="text"
+            value={newFileName}
+            onChange={(e) => setNewFileName(e.target.value)}
+            placeholder="test.txt, testDir/, or testDir/test.txt"
+            autoFocus
+            className="flex-1 px-2.5 py-1.5 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleCreateFile();
+              if (e.key === "Escape") setShowNewFileInput(false);
+            }}
+          />
+          <button
+            onClick={handleCreateFile}
+            className="px-3 py-1.5 text-xs text-white bg-emerald-600 hover:bg-emerald-500 rounded-md transition cursor-pointer"
+          >
+            Create
+          </button>
+          <button
+            onClick={() => setShowNewFileInput(false)}
+            className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white transition cursor-pointer"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
       {error && (
         <div className="mx-4 mt-3 px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
           {error}
         </div>
       )}
 
-      {/* File list */}
-      <div className="flex-1 overflow-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800/50">
-              <th className="text-left py-2.5 px-4 font-medium">Name</th>
-              <th className="text-right py-2.5 px-4 font-medium w-28">Size</th>
-              <th className="text-left py-2.5 px-4 font-medium w-36">Modified</th>
-              <th className="text-left py-2.5 px-4 font-medium w-28">Permissions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {currentPath !== "/" && (
-              <tr
-                onClick={navigateUp}
-                className="hover:bg-zinc-900/50 cursor-pointer transition group"
+      {/* Delete confirmation modal */}
+      {confirmDelete && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-sm w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-medium mb-2">Delete {confirmDelete.is_dir ? "folder" : "file"}?</h3>
+            <p className="text-sm text-zinc-400 mb-4">
+              Are you sure you want to delete <span className="text-zinc-200 font-medium">{confirmDelete.name}</span>?
+              {confirmDelete.is_dir && " This will delete all contents inside it."}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmDelete(null)}
+                className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
               >
-                <td className="py-2 px-4 flex items-center gap-2.5">
-                  <svg className="w-5 h-5 text-zinc-500" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
-                  </svg>
-                  <span className="text-zinc-400 group-hover:text-white transition">..</span>
-                </td>
-                <td />
-                <td />
-                <td />
+                Cancel
+              </button>
+              <button
+                onClick={() => handleDeleteFile(confirmDelete)}
+                className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-500 rounded-lg transition cursor-pointer"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main content area */}
+      <div className="flex-1 flex min-h-0">
+        {/* File list */}
+        <div className={`overflow-auto ${editingFile ? "w-80 shrink-0 border-r border-zinc-800" : "flex-1"}`}>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800/50">
+                <th className="text-left py-2.5 px-4 font-medium">Name</th>
+                {!editingFile && (
+                  <>
+                    <th className="text-right py-2.5 px-4 font-medium w-28">Size</th>
+                    <th className="text-left py-2.5 px-4 font-medium w-36">Modified</th>
+                    <th className="text-left py-2.5 px-4 font-medium w-28">Permissions</th>
+                  </>
+                )}
+                <th className="w-10" />
               </tr>
-            )}
-            {loading ? (
-              <tr>
-                <td colSpan={4} className="py-12 text-center text-zinc-500">
-                  Loading...
-                </td>
-              </tr>
-            ) : (
-              files.map((file) => (
+            </thead>
+            <tbody>
+              {currentPath !== "/" && (
                 <tr
-                  key={file.name}
-                  onClick={() => navigateTo(file)}
-                  className={`border-b border-zinc-800/30 transition ${
-                    file.is_dir
-                      ? "hover:bg-zinc-900/50 cursor-pointer"
-                      : "hover:bg-zinc-900/30"
-                  } group`}
+                  onClick={navigateUp}
+                  className="hover:bg-zinc-900/50 cursor-pointer transition group"
                 >
                   <td className="py-2 px-4 flex items-center gap-2.5">
-                    <FileIcon isDir={file.is_dir} />
-                    <span className="text-zinc-300 group-hover:text-white transition truncate">
-                      {file.name}
-                    </span>
+                    <svg className="w-5 h-5 text-zinc-500" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                    </svg>
+                    <span className="text-zinc-400 group-hover:text-white transition">..</span>
                   </td>
-                  <td className="py-2 px-4 text-right text-zinc-500 tabular-nums">
-                    {file.is_dir ? "—" : formatSize(file.size)}
-                  </td>
-                  <td className="py-2 px-4 text-zinc-500">{file.modified}</td>
-                  <td className="py-2 px-4 text-zinc-600 font-mono text-xs">
-                    {file.permissions}
+                  {!editingFile && (<><td /><td /><td /></>)}
+                  <td />
+                </tr>
+              )}
+              {loading ? (
+                <tr>
+                  <td colSpan={editingFile ? 2 : 5} className="py-12 text-center text-zinc-500">
+                    Loading...
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                files.map((file) => (
+                  <tr
+                    key={file.name}
+                    onClick={() => openFile(file)}
+                    className={`border-b border-zinc-800/30 transition ${
+                      file.is_dir
+                        ? "hover:bg-zinc-900/50 cursor-pointer"
+                        : "hover:bg-zinc-900/30 cursor-pointer"
+                    } group ${
+                      editingFile &&
+                      editingFile === (currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`)
+                        ? "bg-zinc-800/50"
+                        : ""
+                    }`}
+                  >
+                    <td className="py-2 px-4 flex items-center gap-2.5">
+                      <FileIcon isDir={file.is_dir} />
+                      <span className="text-zinc-300 group-hover:text-white transition truncate">
+                        {file.name}
+                      </span>
+                    </td>
+                    {!editingFile && (
+                      <>
+                        <td className="py-2 px-4 text-right text-zinc-500 tabular-nums">
+                          {file.is_dir ? "—" : formatSize(file.size)}
+                        </td>
+                        <td className="py-2 px-4 text-zinc-500">{file.modified}</td>
+                        <td className="py-2 px-4 text-zinc-600 font-mono text-xs">
+                          {file.permissions}
+                        </td>
+                      </>
+                    )}
+                    <td className="py-2 px-2">
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDelete(file);
+                        }}
+                        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
+                        title={`Delete ${file.name}`}
+                      >
+                        <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Editor panel */}
+        {editingFile && (
+          <div className="flex-1 flex flex-col min-h-0">
+            {/* Editor header */}
+            <div className="flex items-center gap-2 px-4 py-2 bg-zinc-900/60 border-b border-zinc-800 shrink-0">
+              <svg className="w-4 h-4 text-zinc-500" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clipRule="evenodd" />
+              </svg>
+              <span className="text-sm text-zinc-300 truncate flex-1">
+                {editingFile.split("/").pop()}
+              </span>
+              {editorDirty && (
+                <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" title="Unsaved changes" />
+              )}
+              <button
+                onClick={saveFile}
+                disabled={saving || !editorDirty}
+                className="px-3 py-1 text-xs text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-md transition cursor-pointer"
+              >
+                {saving ? "Saving..." : "Save"}
+              </button>
+              <button
+                onClick={closeEditor}
+                className="p-1 text-zinc-400 hover:text-white hover:bg-zinc-700 rounded transition cursor-pointer"
+                title="Close editor"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {/* CodeMirror container */}
+            <div ref={editorRef} className="flex-1 min-h-0 overflow-hidden" />
+          </div>
+        )}
       </div>
 
       {/* Status bar */}
       <div className="px-4 py-2 bg-zinc-900/30 border-t border-zinc-800 text-xs text-zinc-500 flex items-center justify-between">
         <span>{files.length} items</span>
-        <span>{currentPath}</span>
+        <span>{editingFile ? editingFile : currentPath}</span>
       </div>
     </div>
   );
