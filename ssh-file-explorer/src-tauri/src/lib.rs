@@ -145,19 +145,8 @@ async fn ssh_disconnect(state: State<'_, SshSession>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Vec<FileEntry>, String> {
-    let s = state.lock().await;
-    let session = s.session.as_ref().ok_or("Not connected")?;
-
+async fn exec_ssh(session: &russh::client::Handle<ClientHandler>, cmd: &str) -> Result<String, String> {
     let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
-
-    let cmd = format!(
-        "LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/* 2>/dev/null; LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/.[!.]* 2>/dev/null",
-        shell_escape(&path),
-        shell_escape(&path)
-    );
-
     channel.exec(true, cmd.as_bytes()).await.map_err(|e| format!("Exec error: {}", e))?;
 
     let mut output = Vec::new();
@@ -173,7 +162,21 @@ async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Ve
         }
     }
 
-    let text = String::from_utf8_lossy(&output);
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+#[tauri::command]
+async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Vec<FileEntry>, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+
+    let cmd = format!(
+        "LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/* 2>/dev/null; LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/.[!.]* 2>/dev/null",
+        shell_escape(&path),
+        shell_escape(&path)
+    );
+
+    let text = exec_ssh(session, &cmd).await?;
     let mut entries = Vec::new();
 
     for line in text.lines() {
@@ -212,6 +215,53 @@ async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Ve
     }
 
     Ok(entries)
+}
+
+#[tauri::command]
+async fn read_file(path: String, state: State<'_, SshSession>) -> Result<String, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("cat {}", shell_escape(&path));
+    exec_ssh(session, &cmd).await
+}
+
+#[tauri::command]
+async fn write_file(path: String, content: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+
+    let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+    let cmd = format!("cat > {}", shell_escape(&path));
+    channel.exec(true, cmd.as_bytes()).await.map_err(|e| format!("Exec error: {}", e))?;
+
+    let mut stream = channel.into_stream();
+    use tokio::io::AsyncWriteExt;
+    stream.write_all(content.as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
+    stream.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_file(path: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("touch {}", shell_escape(&path));
+    exec_ssh(session, &cmd).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_file(path: String, is_dir: bool, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = if is_dir {
+        format!("rm -rf {}", shell_escape(&path))
+    } else {
+        format!("rm -f {}", shell_escape(&path))
+    };
+    exec_ssh(session, &cmd).await?;
+    Ok(())
 }
 
 fn shell_escape(s: &str) -> String {
@@ -272,6 +322,10 @@ pub fn run() {
             ssh_connect,
             ssh_disconnect,
             list_directory,
+            read_file,
+            write_file,
+            create_file,
+            delete_file,
             get_saved_connections,
             save_connection,
             delete_connection,
