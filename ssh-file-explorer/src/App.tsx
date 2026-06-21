@@ -98,6 +98,56 @@ function App() {
 
   const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
 
+  type SudoRetryAction =
+    | { type: "read"; path: string }
+    | { type: "write"; path: string; content: string }
+    | { type: "create"; path: string }
+    | { type: "createDir"; path: string }
+    | { type: "delete"; path: string; isDir: boolean };
+  const [sudoRetry, setSudoRetry] = useState<SudoRetryAction | null>(null);
+
+  const isPermissionError = (err: unknown): boolean => {
+    const msg = String(err).toLowerCase();
+    return msg.includes("permission denied") || msg.includes("operation not permitted");
+  };
+
+  const handleSudoRetry = async () => {
+    if (!sudoRetry) return;
+    setError("");
+    try {
+      switch (sudoRetry.type) {
+        case "read": {
+          const content: string = await invoke("sudo_read_file", { path: sudoRetry.path, sudoPassword: password });
+          setEditingContent(content);
+          setEditingFile(sudoRetry.path);
+          setEditorDirty(false);
+          break;
+        }
+        case "write":
+          await invoke("sudo_write_file", { path: sudoRetry.path, content: sudoRetry.content, sudoPassword: password });
+          setEditorDirty(false);
+          await listFiles(currentPath);
+          break;
+        case "create":
+          await invoke("sudo_create_file", { path: sudoRetry.path, sudoPassword: password });
+          await listFiles(currentPath);
+          break;
+        case "createDir":
+          await invoke("sudo_create_directory", { path: sudoRetry.path, sudoPassword: password });
+          await listFiles(currentPath);
+          break;
+        case "delete":
+          await invoke("sudo_delete_file", { path: sudoRetry.path, isDir: sudoRetry.isDir, sudoPassword: password });
+          if (editingFile === sudoRetry.path) closeEditor();
+          await listFiles(currentPath);
+          break;
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+    setSudoRetry(null);
+  };
+
   useEffect(() => {
     loadSavedConnections();
   }, []);
@@ -286,7 +336,11 @@ function App() {
       setEditingFile(filePath);
       setEditorDirty(false);
     } catch (e) {
-      setError(String(e));
+      if (isPermissionError(e)) {
+        setSudoRetry({ type: "read", path: filePath });
+      } else {
+        setError(String(e));
+      }
     }
   };
 
@@ -300,7 +354,12 @@ function App() {
       setEditorDirty(false);
       await listFiles(currentPath);
     } catch (e) {
-      setError(String(e));
+      if (isPermissionError(e)) {
+        const content = editorViewRef.current.state.doc.toString();
+        setSudoRetry({ type: "write", path: editingFile, content });
+      } else {
+        setError(String(e));
+      }
     } finally {
       setSaving(false);
     }
@@ -328,7 +387,13 @@ function App() {
       setShowNewFileInput(false);
       await listFiles(currentPath);
     } catch (e) {
-      setError(String(e));
+      if (isPermissionError(e)) {
+        setSudoRetry(name.endsWith("/")
+          ? { type: "createDir", path: fullPath }
+          : { type: "create", path: fullPath });
+      } else {
+        setError(String(e));
+      }
     }
   };
 
@@ -346,7 +411,12 @@ function App() {
       }
       await listFiles(currentPath);
     } catch (e) {
-      setError(String(e));
+      setConfirmDelete(null);
+      if (isPermissionError(e)) {
+        setSudoRetry({ type: "delete", path: filePath, isDir: file.is_dir });
+      } else {
+        setError(String(e));
+      }
     }
   };
 
@@ -647,6 +717,37 @@ function App() {
                 className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-500 rounded-lg transition cursor-pointer"
               >
                 Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sudo retry modal */}
+      {sudoRetry && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-sm w-full mx-4 shadow-2xl">
+            <div className="flex items-center gap-2 mb-2">
+              <svg className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m0 0v2m0-2h2m-2 0H10m5-6a3 3 0 11-6 0 3 3 0 016 0zM3 12a9 9 0 1118 0 9 9 0 01-18 0z" />
+              </svg>
+              <h3 className="text-white font-medium">Permission Denied</h3>
+            </div>
+            <p className="text-sm text-zinc-400 mb-4">
+              This action requires elevated privileges. Retry as <span className="text-amber-400 font-medium">sudo</span> using your current credentials?
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setSudoRetry(null)}
+                className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSudoRetry}
+                className="px-4 py-2 text-sm text-white bg-amber-600 hover:bg-amber-500 rounded-lg transition cursor-pointer"
+              >
+                Retry with sudo
               </button>
             </div>
           </div>
