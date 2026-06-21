@@ -98,54 +98,12 @@ function App() {
 
   const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
 
-  type SudoRetryAction =
-    | { type: "read"; path: string }
-    | { type: "write"; path: string; content: string }
-    | { type: "create"; path: string }
-    | { type: "createDir"; path: string }
-    | { type: "delete"; path: string; isDir: boolean };
-  const [sudoRetry, setSudoRetry] = useState<SudoRetryAction | null>(null);
+  const [dirWritable, setDirWritable] = useState(true);
+  const [fileWritable, setFileWritable] = useState(true);
 
   const isPermissionError = (err: unknown): boolean => {
     const msg = String(err).toLowerCase();
     return msg.includes("permission denied") || msg.includes("operation not permitted");
-  };
-
-  const handleSudoRetry = async () => {
-    if (!sudoRetry) return;
-    setError("");
-    try {
-      switch (sudoRetry.type) {
-        case "read": {
-          const content: string = await invoke("sudo_read_file", { path: sudoRetry.path, sudoPassword: password });
-          setEditingContent(content);
-          setEditingFile(sudoRetry.path);
-          setEditorDirty(false);
-          break;
-        }
-        case "write":
-          await invoke("sudo_write_file", { path: sudoRetry.path, content: sudoRetry.content, sudoPassword: password });
-          setEditorDirty(false);
-          await listFiles(currentPath);
-          break;
-        case "create":
-          await invoke("sudo_create_file", { path: sudoRetry.path, sudoPassword: password });
-          await listFiles(currentPath);
-          break;
-        case "createDir":
-          await invoke("sudo_create_directory", { path: sudoRetry.path, sudoPassword: password });
-          await listFiles(currentPath);
-          break;
-        case "delete":
-          await invoke("sudo_delete_file", { path: sudoRetry.path, isDir: sudoRetry.isDir, sudoPassword: password });
-          if (editingFile === sudoRetry.path) closeEditor();
-          await listFiles(currentPath);
-          break;
-      }
-    } catch (e) {
-      setError(String(e));
-    }
-    setSudoRetry(null);
   };
 
   useEffect(() => {
@@ -231,6 +189,8 @@ function App() {
       });
       setFiles(entries);
       setCurrentPath(path);
+      const writable: boolean = await invoke("check_writable", { path });
+      setDirWritable(writable);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -331,16 +291,23 @@ function App() {
 
     setError("");
     try {
-      const content: string = await invoke("read_file", { path: filePath });
+      let content: string;
+      try {
+        content = await invoke("read_file", { path: filePath });
+      } catch (e) {
+        if (isPermissionError(e)) {
+          content = await invoke("sudo_read_file", { path: filePath, sudoPassword: password });
+        } else {
+          throw e;
+        }
+      }
       setEditingContent(content);
       setEditingFile(filePath);
       setEditorDirty(false);
+      const writable: boolean = await invoke("check_writable", { path: filePath });
+      setFileWritable(writable);
     } catch (e) {
-      if (isPermissionError(e)) {
-        setSudoRetry({ type: "read", path: filePath });
-      } else {
-        setError(String(e));
-      }
+      setError(String(e));
     }
   };
 
@@ -350,16 +317,19 @@ function App() {
     setError("");
     try {
       const content = editorViewRef.current.state.doc.toString();
-      await invoke("write_file", { path: editingFile, content });
+      try {
+        await invoke("write_file", { path: editingFile, content });
+      } catch (e) {
+        if (isPermissionError(e)) {
+          await invoke("sudo_write_file", { path: editingFile, content, sudoPassword: password });
+        } else {
+          throw e;
+        }
+      }
       setEditorDirty(false);
       await listFiles(currentPath);
     } catch (e) {
-      if (isPermissionError(e)) {
-        const content = editorViewRef.current.state.doc.toString();
-        setSudoRetry({ type: "write", path: editingFile, content });
-      } else {
-        setError(String(e));
-      }
+      setError(String(e));
     } finally {
       setSaving(false);
     }
@@ -369,6 +339,7 @@ function App() {
     setEditingFile(null);
     setEditingContent("");
     setEditorDirty(false);
+    setFileWritable(true);
   };
 
   const handleCreateFile = async () => {
@@ -378,22 +349,29 @@ function App() {
       currentPath === "/" ? `/${name}` : `${currentPath}/${name}`;
     setError("");
     try {
-      if (name.endsWith("/")) {
-        await invoke("create_directory", { path: fullPath });
-      } else {
-        await invoke("create_file", { path: fullPath });
+      const isDir = name.endsWith("/");
+      try {
+        if (isDir) {
+          await invoke("create_directory", { path: fullPath });
+        } else {
+          await invoke("create_file", { path: fullPath });
+        }
+      } catch (e) {
+        if (isPermissionError(e)) {
+          if (isDir) {
+            await invoke("sudo_create_directory", { path: fullPath, sudoPassword: password });
+          } else {
+            await invoke("sudo_create_file", { path: fullPath, sudoPassword: password });
+          }
+        } else {
+          throw e;
+        }
       }
       setNewFileName("");
       setShowNewFileInput(false);
       await listFiles(currentPath);
     } catch (e) {
-      if (isPermissionError(e)) {
-        setSudoRetry(name.endsWith("/")
-          ? { type: "createDir", path: fullPath }
-          : { type: "create", path: fullPath });
-      } else {
-        setError(String(e));
-      }
+      setError(String(e));
     }
   };
 
@@ -404,7 +382,15 @@ function App() {
         : `${currentPath}/${file.name}`;
     setError("");
     try {
-      await invoke("delete_file", { path: filePath, isDir: file.is_dir });
+      try {
+        await invoke("delete_file", { path: filePath, isDir: file.is_dir });
+      } catch (e) {
+        if (isPermissionError(e)) {
+          await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword: password });
+        } else {
+          throw e;
+        }
+      }
       setConfirmDelete(null);
       if (editingFile === filePath) {
         closeEditor();
@@ -412,11 +398,7 @@ function App() {
       await listFiles(currentPath);
     } catch (e) {
       setConfirmDelete(null);
-      if (isPermissionError(e)) {
-        setSudoRetry({ type: "delete", path: filePath, isDir: file.is_dir });
-      } else {
-        setError(String(e));
-      }
+      setError(String(e));
     }
   };
 
@@ -696,6 +678,18 @@ function App() {
         </div>
       )}
 
+      {/* Protected directory warning */}
+      {!dirWritable && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20">
+          <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-xs text-amber-400">
+            This directory is protected — actions will use elevated privileges (sudo)
+          </span>
+        </div>
+      )}
+
       {/* Delete confirmation modal */}
       {confirmDelete && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
@@ -717,37 +711,6 @@ function App() {
                 className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-500 rounded-lg transition cursor-pointer"
               >
                 Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Sudo retry modal */}
-      {sudoRetry && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-sm w-full mx-4 shadow-2xl">
-            <div className="flex items-center gap-2 mb-2">
-              <svg className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m0 0v2m0-2h2m-2 0H10m5-6a3 3 0 11-6 0 3 3 0 016 0zM3 12a9 9 0 1118 0 9 9 0 01-18 0z" />
-              </svg>
-              <h3 className="text-white font-medium">Permission Denied</h3>
-            </div>
-            <p className="text-sm text-zinc-400 mb-4">
-              This action requires elevated privileges. Retry as <span className="text-amber-400 font-medium">sudo</span> using your current credentials?
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setSudoRetry(null)}
-                className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSudoRetry}
-                className="px-4 py-2 text-sm text-white bg-amber-600 hover:bg-amber-500 rounded-lg transition cursor-pointer"
-              >
-                Retry with sudo
               </button>
             </div>
           </div>
@@ -859,6 +822,14 @@ function App() {
               <span className="text-sm text-zinc-300 truncate flex-1">
                 {editingFile.split("/").pop()}
               </span>
+              {!fileWritable && (
+                <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-500/15 border border-amber-500/30 rounded text-[10px] text-amber-400 shrink-0">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                  Protected
+                </span>
+              )}
               {editorDirty && (
                 <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" title="Unsaved changes" />
               )}

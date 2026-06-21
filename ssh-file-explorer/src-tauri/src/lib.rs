@@ -194,6 +194,15 @@ async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password:
 }
 
 #[tauri::command]
+async fn check_writable(path: String, state: State<'_, SshSession>) -> Result<bool, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("test -w {} && echo 'y' || echo 'n'", shell_escape(&path));
+    let output = exec_ssh(session, &cmd).await?;
+    Ok(output.trim() == "y")
+}
+
+#[tauri::command]
 async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Vec<FileEntry>, String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
@@ -471,6 +480,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ssh_connect,
             ssh_disconnect,
+            check_writable,
             list_directory,
             read_file,
             write_file,
