@@ -585,6 +585,44 @@ async fn sudo_delete_file(path: String, is_dir: bool, sudo_password: String, sta
     Ok(())
 }
 
+#[derive(Serialize)]
+struct SearchResult {
+    path: String,
+    name: String,
+    is_dir: bool,
+}
+
+#[tauri::command]
+async fn search_files(query: String, search_path: String, state: State<'_, SshSession>) -> Result<Vec<SearchResult>, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let escaped_query = query.replace("'", "'\\''");
+    let cmd = format!(
+        "find {} -maxdepth 5 -iname '*{}*' -not -path '*/\\.*' -printf '%y|%p\\n' 2>/dev/null | head -50",
+        shell_escape(&search_path),
+        escaped_query
+    );
+    let output = exec_ssh(session, &cmd).await?;
+    let mut results = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (dtype, path) = match line.split_once('|') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        results.push(SearchResult {
+            path: path.to_string(),
+            name,
+            is_dir: dtype == "d",
+        });
+    }
+    Ok(results)
+}
+
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -656,6 +694,7 @@ pub fn run() {
             sudo_create_file,
             sudo_create_directory,
             sudo_delete_file,
+            search_files,
             get_saved_connections,
             save_connection,
             get_connection_password,
