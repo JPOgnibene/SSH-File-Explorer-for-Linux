@@ -21,6 +21,8 @@ impl russh::client::Handler for ClientHandler {
     }
 }
 
+const KEYRING_SERVICE: &str = "ssh-file-explorer";
+
 #[derive(Serialize, Deserialize, Clone)]
 struct SavedConnection {
     id: String,
@@ -28,6 +30,9 @@ struct SavedConnection {
     host: String,
     port: u16,
     username: String,
+    #[serde(default)]
+    has_password: bool,
+    #[serde(skip_serializing, default)]
     password: Option<String>,
 }
 
@@ -68,7 +73,13 @@ fn write_connections(app: &AppHandle, connections: &[SavedConnection]) -> Result
 
 #[tauri::command]
 async fn get_saved_connections(app: AppHandle) -> Result<Vec<SavedConnection>, String> {
-    read_connections(&app)
+    let mut connections = read_connections(&app)?;
+    for conn in &mut connections {
+        conn.has_password = keyring::Entry::new(KEYRING_SERVICE, &conn.id)
+            .and_then(|e| e.get_password())
+            .is_ok();
+    }
+    Ok(connections)
 }
 
 #[tauri::command]
@@ -83,13 +94,34 @@ async fn save_connection(
 ) -> Result<(), String> {
     let mut connections = read_connections(&app)?;
 
-    let existing = connections.iter_mut().find(|c| {
+    let resolved_id = if let Some(existing) = connections.iter().find(|c| {
         c.id == id || (c.host == host && c.port == port && c.username == username)
-    });
+    }) {
+        existing.id.clone()
+    } else {
+        id.clone()
+    };
 
-    let conn = SavedConnection { id: id.clone(), label, host, port, username, password };
+    if let Some(pw) = &password {
+        keyring::Entry::new(KEYRING_SERVICE, &resolved_id)
+            .and_then(|e| e.set_password(pw))
+            .map_err(|e| format!("Failed to store password in keychain: {}", e))?;
+    } else {
+        let _ = keyring::Entry::new(KEYRING_SERVICE, &resolved_id)
+            .and_then(|e| e.delete_credential());
+    }
 
-    if let Some(entry) = existing {
+    let conn = SavedConnection {
+        id: resolved_id.clone(),
+        label,
+        host,
+        port,
+        username,
+        has_password: password.is_some(),
+        password: None,
+    };
+
+    if let Some(entry) = connections.iter_mut().find(|c| c.id == resolved_id) {
         *entry = conn;
     } else {
         connections.push(conn);
@@ -99,7 +131,16 @@ async fn save_connection(
 }
 
 #[tauri::command]
+async fn get_connection_password(id: String) -> Result<String, String> {
+    keyring::Entry::new(KEYRING_SERVICE, &id)
+        .and_then(|e| e.get_password())
+        .map_err(|e| format!("Failed to retrieve password: {}", e))
+}
+
+#[tauri::command]
 async fn delete_connection(app: AppHandle, id: String) -> Result<(), String> {
+    let _ = keyring::Entry::new(KEYRING_SERVICE, &id)
+        .and_then(|e| e.delete_credential());
     let mut connections = read_connections(&app)?;
     connections.retain(|c| c.id != id);
     write_connections(&app, &connections)
@@ -494,6 +535,7 @@ pub fn run() {
             sudo_delete_file,
             get_saved_connections,
             save_connection,
+            get_connection_password,
             delete_connection,
         ])
         .run(tauri::generate_context!())
