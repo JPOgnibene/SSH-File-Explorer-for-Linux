@@ -28,6 +28,15 @@ interface SavedConnection {
   port: number;
   username: string;
   has_password: boolean;
+  auth_method: string;
+  key_path?: string;
+}
+
+interface SshKeyInfo {
+  path: string;
+  name: string;
+  key_type: string;
+  encrypted: boolean;
 }
 
 function formatSize(bytes: number): string {
@@ -78,6 +87,12 @@ function App() {
   const [password, setPassword] = useState("");
   const [savePassword, setSavePassword] = useState(true);
 
+  const [authMethod, setAuthMethod] = useState<"password" | "key">("password");
+  const [availableKeys, setAvailableKeys] = useState<SshKeyInfo[]>([]);
+  const [selectedKeyPath, setSelectedKeyPath] = useState("");
+  const [keyPassphrase, setKeyPassphrase] = useState("");
+  const [sudoPassword, setSudoPassword] = useState("");
+
   const [currentPath, setCurrentPath] = useState("/");
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -106,9 +121,21 @@ function App() {
     return msg.includes("permission denied") || msg.includes("operation not permitted");
   };
 
+
   useEffect(() => {
     loadSavedConnections();
+    loadSshKeys();
   }, []);
+
+  const loadSshKeys = async () => {
+    try {
+      const keys: SshKeyInfo[] = await invoke("discover_ssh_keys");
+      setAvailableKeys(keys);
+      if (keys.length > 0) {
+        setSelectedKeyPath(keys[0].path);
+      }
+    } catch (_) {}
+  };
 
   useEffect(() => {
     if (!connected) return;
@@ -207,6 +234,31 @@ function App() {
       setPort(String(p));
       setUsername(u);
       setPassword(pw);
+      setSudoPassword(pw);
+      setConnected(true);
+      await listFiles("/");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const doConnectKey = async (h: string, p: number, u: string, kp: string, pp: string | null) => {
+    setConnecting(true);
+    setError("");
+    try {
+      await invoke("ssh_connect_key", {
+        host: h,
+        port: p,
+        username: u,
+        keyPath: kp,
+        passphrase: pp || null,
+      });
+      setHost(h);
+      setPort(String(p));
+      setUsername(u);
+      setPassword("");
       setConnected(true);
       await listFiles("/");
     } catch (e) {
@@ -218,11 +270,23 @@ function App() {
 
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
-    await doConnect(host, parseInt(port), username, password);
+    if (authMethod === "key") {
+      await doConnectKey(host, parseInt(port), username, selectedKeyPath, keyPassphrase || null);
+    } else {
+      await doConnect(host, parseInt(port), username, password);
+    }
   };
 
   const handleSavedConnect = async (conn: SavedConnection) => {
-    if (conn.has_password) {
+    if (conn.auth_method === "key" && conn.key_path) {
+      if (conn.has_password) {
+        try {
+          const pw: string = await invoke("get_connection_password", { id: conn.id });
+          setSudoPassword(pw);
+        } catch (_) {}
+      }
+      await doConnectKey(conn.host, conn.port, conn.username, conn.key_path, null);
+    } else if (conn.has_password) {
       try {
         const pw: string = await invoke("get_connection_password", { id: conn.id });
         await doConnect(conn.host, conn.port, conn.username, pw);
@@ -252,7 +316,11 @@ function App() {
         host,
         port: parseInt(port),
         username,
-        password: savePassword ? password : null,
+        password: authMethod === "password"
+          ? (savePassword ? password : null)
+          : (sudoPassword || null),
+        authMethod,
+        keyPath: authMethod === "key" ? selectedKeyPath : null,
       });
       await loadSavedConnections();
       setShowSaveForm(false);
@@ -280,6 +348,7 @@ function App() {
     setFiles([]);
     setCurrentPath("/");
     setError("");
+    setSudoPassword("");
     closeEditor();
   };
 
@@ -304,8 +373,8 @@ function App() {
       try {
         content = await invoke("read_file", { path: filePath });
       } catch (e) {
-        if (isPermissionError(e)) {
-          content = await invoke("sudo_read_file", { path: filePath, sudoPassword: password });
+        if (isPermissionError(e) && sudoPassword) {
+          content = await invoke("sudo_read_file", { path: filePath, sudoPassword });
         } else {
           throw e;
         }
@@ -329,8 +398,8 @@ function App() {
       try {
         await invoke("write_file", { path: editingFile, content });
       } catch (e) {
-        if (isPermissionError(e)) {
-          await invoke("sudo_write_file", { path: editingFile, content, sudoPassword: password });
+        if (isPermissionError(e) && sudoPassword) {
+          await invoke("sudo_write_file", { path: editingFile, content, sudoPassword });
         } else {
           throw e;
         }
@@ -366,11 +435,11 @@ function App() {
           await invoke("create_file", { path: fullPath });
         }
       } catch (e) {
-        if (isPermissionError(e)) {
+        if (isPermissionError(e) && sudoPassword) {
           if (isDir) {
-            await invoke("sudo_create_directory", { path: fullPath, sudoPassword: password });
+            await invoke("sudo_create_directory", { path: fullPath, sudoPassword });
           } else {
-            await invoke("sudo_create_file", { path: fullPath, sudoPassword: password });
+            await invoke("sudo_create_file", { path: fullPath, sudoPassword });
           }
         } else {
           throw e;
@@ -378,7 +447,14 @@ function App() {
       }
       setNewFileName("");
       setShowNewFileInput(false);
-      await listFiles(currentPath);
+      // If a nested path like "dir/file.txt" was created, navigate to the parent dir
+      const slashIdx = name.indexOf("/");
+      if (!isDir && slashIdx !== -1) {
+        const targetDir = fullPath.substring(0, fullPath.lastIndexOf("/"));
+        await listFiles(targetDir);
+      } else {
+        await listFiles(currentPath);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -394,8 +470,8 @@ function App() {
       try {
         await invoke("delete_file", { path: filePath, isDir: file.is_dir });
       } catch (e) {
-        if (isPermissionError(e)) {
-          await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword: password });
+        if (isPermissionError(e) && sudoPassword) {
+          await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword });
         } else {
           throw e;
         }
@@ -451,7 +527,7 @@ function App() {
                       <div className="text-sm text-white font-medium truncate">{conn.label}</div>
                       <div className="text-xs text-zinc-500 truncate">
                         {conn.username}@{conn.host}:{conn.port}
-                        {!conn.has_password && " (password required)"}
+                        {conn.auth_method === "key" ? " (key)" : !conn.has_password ? " (password required)" : ""}
                       </div>
                     </div>
                     <div
@@ -516,17 +592,96 @@ function App() {
                 />
               </div>
 
+              {/* Auth method toggle */}
               <div>
-                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Password</label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  required
-                  className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
-                />
+                <label className="block text-xs font-medium text-zinc-400 mb-1.5">Authentication</label>
+                <div className="flex rounded-lg overflow-hidden border border-zinc-800">
+                  <button
+                    type="button"
+                    onClick={() => setAuthMethod("password")}
+                    className={`flex-1 py-2 text-xs font-medium transition cursor-pointer ${
+                      authMethod === "password"
+                        ? "bg-emerald-600 text-white"
+                        : "bg-zinc-900 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    Password
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAuthMethod("key")}
+                    className={`flex-1 py-2 text-xs font-medium transition cursor-pointer ${
+                      authMethod === "key"
+                        ? "bg-emerald-600 text-white"
+                        : "bg-zinc-900 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    SSH Key{availableKeys.length > 0 ? ` (${availableKeys.length} found)` : ""}
+                  </button>
+                </div>
               </div>
+
+              {authMethod === "password" ? (
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400 mb-1.5">Password</label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    required
+                    className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
+                  />
+                </div>
+              ) : (
+                <>
+                  {availableKeys.length > 0 ? (
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-400 mb-1.5">Private Key</label>
+                      <select
+                        value={selectedKeyPath}
+                        onChange={(e) => setSelectedKeyPath(e.target.value)}
+                        className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition cursor-pointer"
+                      >
+                        {availableKeys.map((k) => (
+                          <option key={k.path} value={k.path}>
+                            {k.name} ({k.key_type}){k.encrypted ? " 🔒" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : (
+                    <div className="px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-400 text-sm">
+                      No SSH keys found in ~/.ssh/
+                    </div>
+                  )}
+                  {availableKeys.find((k) => k.path === selectedKeyPath)?.encrypted && (
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-400 mb-1.5">Key Passphrase</label>
+                      <input
+                        type="password"
+                        value={keyPassphrase}
+                        onChange={(e) => setKeyPassphrase(e.target.value)}
+                        placeholder="Passphrase for encrypted key"
+                        className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
+                      />
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                      Sudo Password <span className="text-zinc-600 font-normal">(optional)</span>
+                    </label>
+                    <input
+                      type="password"
+                      value={sudoPassword}
+                      onChange={(e) => setSudoPassword(e.target.value)}
+                      placeholder="Account password for sudo"
+                      className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
+                    />
+                    <p className="text-xs text-zinc-500 mt-1">Not used for login — only for elevated file operations (sudo). Without this, actions on protected files will be denied.</p>
+                  </div>
+                </>
+              )}
 
               {error && (
                 <div className="px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
@@ -635,15 +790,17 @@ function App() {
               if (e.key === "Escape") setShowSaveForm(false);
             }}
           />
-          <label className="flex items-center gap-1.5 text-xs text-zinc-400 shrink-0 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={savePassword}
-              onChange={(e) => setSavePassword(e.target.checked)}
-              className="rounded border-zinc-600 accent-emerald-500"
-            />
-            Save password
-          </label>
+          {authMethod === "password" && (
+            <label className="flex items-center gap-1.5 text-xs text-zinc-400 shrink-0 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={savePassword}
+                onChange={(e) => setSavePassword(e.target.checked)}
+                className="rounded border-zinc-600 accent-emerald-500"
+              />
+              Save password
+            </label>
+          )}
           <button
             onClick={handleSaveConnection}
             className="px-3 py-1.5 text-xs text-white bg-emerald-600 hover:bg-emerald-500 rounded-md transition cursor-pointer"

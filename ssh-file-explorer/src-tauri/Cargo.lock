@@ -4988,6 +4988,7 @@ name = "ssh-file-explorer"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dirs",
  "keyring",
  "russh",
  "russh-keys",
