@@ -34,6 +34,14 @@ struct SavedConnection {
     has_password: bool,
     #[serde(skip_serializing, default)]
     password: Option<String>,
+    #[serde(default = "default_auth_method")]
+    auth_method: String,
+    #[serde(default)]
+    key_path: Option<String>,
+}
+
+fn default_auth_method() -> String {
+    "password".to_string()
 }
 
 #[derive(Serialize)]
@@ -91,6 +99,8 @@ async fn save_connection(
     port: u16,
     username: String,
     password: Option<String>,
+    auth_method: Option<String>,
+    key_path: Option<String>,
 ) -> Result<(), String> {
     let mut connections = read_connections(&app)?;
 
@@ -119,6 +129,8 @@ async fn save_connection(
         username,
         has_password: password.is_some(),
         password: None,
+        auth_method: auth_method.unwrap_or_else(|| "password".to_string()),
+        key_path,
     };
 
     if let Some(entry) = connections.iter_mut().find(|c| c.id == resolved_id) {
@@ -146,6 +158,71 @@ async fn delete_connection(app: AppHandle, id: String) -> Result<(), String> {
     write_connections(&app, &connections)
 }
 
+#[derive(Serialize)]
+struct SshKeyInfo {
+    path: String,
+    name: String,
+    key_type: String,
+    encrypted: bool,
+}
+
+#[tauri::command]
+async fn discover_ssh_keys() -> Result<Vec<SshKeyInfo>, String> {
+    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    let ssh_dir = home.join(".ssh");
+
+    if !ssh_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut keys = Vec::new();
+
+    let entries = std::fs::read_dir(&ssh_dir).map_err(|e| format!("Failed to read .ssh dir: {}", e))?;
+    for entry in entries.flatten() {
+        let key_path = entry.path();
+        if !key_path.is_file() {
+            continue;
+        }
+
+        let name = key_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if name.ends_with(".pub") || name == "known_hosts" || name == "authorized_keys" || name == "config" {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&key_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !content.contains("PRIVATE KEY") {
+            continue;
+        }
+
+        let encrypted = content.contains("ENCRYPTED");
+        let key_type = if content.contains("ED25519") {
+            "ED25519"
+        } else if content.contains("ECDSA") {
+            "ECDSA"
+        } else if content.contains("DSA PRIVATE") && !content.contains("ECDSA") {
+            "DSA"
+        } else if content.contains("RSA") {
+            "RSA"
+        } else if content.contains("OPENSSH PRIVATE KEY") {
+            "OpenSSH"
+        } else {
+            "Unknown"
+        }.to_string();
+
+        keys.push(SshKeyInfo {
+            path: key_path.to_string_lossy().into_owned(),
+            name,
+            key_type,
+            encrypted,
+        });
+    }
+
+    Ok(keys)
+}
+
 #[tauri::command]
 async fn ssh_connect(
     host: String,
@@ -168,6 +245,47 @@ async fn ssh_connect(
 
     if !auth_ok.success() {
         return Err("Authentication failed: invalid credentials".into());
+    }
+
+    let mut s = state.lock().await;
+    s.session = Some(session);
+    Ok(())
+}
+
+#[tauri::command]
+async fn ssh_connect_key(
+    host: String,
+    port: u16,
+    username: String,
+    key_path: String,
+    passphrase: Option<String>,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
+    let key_data = std::fs::read_to_string(&key_path)
+        .map_err(|e| format!("Failed to read key file: {}", e))?;
+
+    let key_pair = russh::keys::decode_secret_key(&key_data, passphrase.as_deref())
+        .map_err(|e| format!("Failed to decode key: {}", e))?;
+
+    let config = Arc::new(russh::client::Config::default());
+    let handler = ClientHandler;
+
+    let mut session = russh::client::connect(config, (host.as_str(), port), handler)
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+
+    let key_with_alg = russh::keys::PrivateKeyWithHashAlg::new(
+        Arc::new(key_pair),
+        None,
+    );
+
+    let auth_ok = session
+        .authenticate_publickey(&username, key_with_alg)
+        .await
+        .map_err(|e| format!("Auth error: {}", e))?;
+
+    if !auth_ok.success() {
+        return Err("Authentication failed: key not accepted by server".into());
     }
 
     let mut s = state.lock().await;
@@ -519,7 +637,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(Mutex::new(SshState { session: None })) as SshSession)
         .invoke_handler(tauri::generate_handler![
+            discover_ssh_keys,
             ssh_connect,
+            ssh_connect_key,
             ssh_disconnect,
             check_writable,
             list_directory,
