@@ -598,7 +598,7 @@ async fn search_files(query: String, search_path: String, state: State<'_, SshSe
     let session = s.session.as_ref().ok_or("Not connected")?;
     let escaped_query = query.replace("'", "'\\''");
     let cmd = format!(
-        "find {} -maxdepth 5 -iname '*{}*' -not -path '*/\\.*' -printf '%y|%p\\n' 2>/dev/null | head -50",
+        "find {} -maxdepth 1 -iname '*{}*' -not -name '.*' -printf '%y|%p\\n' 2>/dev/null | head -50",
         shell_escape(&search_path),
         escaped_query
     );

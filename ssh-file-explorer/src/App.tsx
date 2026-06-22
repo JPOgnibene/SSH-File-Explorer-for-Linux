@@ -120,7 +120,9 @@ function App() {
   const [searchResults, setSearchResults] = useState<{ path: string; name: string; is_dir: boolean }[]>([]);
   const [searching, setSearching] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [searchSelectedIndex, setSearchSelectedIndex] = useState(-1);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchPrefixRef = useRef("");
 
   const isPermissionError = (err: unknown): boolean => {
     const msg = String(err).toLowerCase();
@@ -490,18 +492,37 @@ function App() {
     if (!query.trim()) {
       setSearchResults([]);
       setSearching(false);
+      setSearchSelectedIndex(-1);
       return;
     }
     setSearching(true);
+    const trimmed = query.trim();
+    const slashIdx = trimmed.lastIndexOf("/");
+    searchPrefixRef.current = slashIdx !== -1 ? trimmed.substring(0, slashIdx + 1) : "";
     searchTimerRef.current = setTimeout(async () => {
       try {
+        let searchPath = currentPath;
+        let searchTerm = trimmed;
+        const slashIdx = searchTerm.lastIndexOf("/");
+        if (slashIdx !== -1) {
+          const dirPart = searchTerm.substring(0, slashIdx);
+          searchTerm = searchTerm.substring(slashIdx + 1);
+          if (dirPart.startsWith("/")) {
+            searchPath = dirPart || "/";
+          } else {
+            searchPath = currentPath === "/" ? `/${dirPart}` : `${currentPath}/${dirPart}`;
+          }
+        }
+        if (!searchTerm) searchTerm = "*";
         const results: { path: string; name: string; is_dir: boolean }[] = await invoke("search_files", {
-          query: query.trim(),
-          searchPath: currentPath,
+          query: searchTerm,
+          searchPath,
         });
         setSearchResults(results);
+        setSearchSelectedIndex(-1);
       } catch (e) {
         setSearchResults([]);
+        setSearchSelectedIndex(-1);
       } finally {
         setSearching(false);
       }
@@ -847,11 +868,24 @@ function App() {
               type="text"
               value={searchQuery}
               onChange={(e) => handleSearch(e.target.value)}
-              placeholder={`Search files in ${currentPath}...`}
+              placeholder={`Search in ${currentPath}  ·  Use /path/ prefix to search elsewhere`}
               autoFocus
               className="flex-1 px-2.5 py-1.5 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition"
               onKeyDown={(e) => {
-                if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchResults([]); }
+                if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchResults([]); setSearchSelectedIndex(-1); }
+                if (e.key === "Tab" && searchResults.length > 0) {
+                  e.preventDefault();
+                  const nextIdx = e.shiftKey
+                    ? (searchSelectedIndex <= 0 ? searchResults.length - 1 : searchSelectedIndex - 1)
+                    : (searchSelectedIndex + 1) % searchResults.length;
+                  setSearchSelectedIndex(nextIdx);
+                  const result = searchResults[nextIdx];
+                  setSearchQuery(searchPrefixRef.current + result.name + (result.is_dir ? "/" : ""));
+                }
+                if (e.key === "Enter" && searchSelectedIndex >= 0 && searchSelectedIndex < searchResults.length) {
+                  e.preventDefault();
+                  handleSearchSelect(searchResults[searchSelectedIndex]);
+                }
               }}
             />
             {searching && <span className="text-xs text-zinc-500 shrink-0">Searching...</span>}
@@ -868,7 +902,7 @@ function App() {
                 <button
                   key={i}
                   onClick={() => handleSearchSelect(result)}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-zinc-700 transition cursor-pointer first:rounded-t-lg last:rounded-b-lg"
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition cursor-pointer first:rounded-t-lg last:rounded-b-lg ${i === searchSelectedIndex ? "bg-zinc-600" : "hover:bg-zinc-700"}`}
                 >
                   <span className={`shrink-0 ${result.is_dir ? "text-blue-400" : "text-zinc-400"}`}>
                     {result.is_dir ? (
