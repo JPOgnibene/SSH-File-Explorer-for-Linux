@@ -116,6 +116,14 @@ function App() {
   const [dirWritable, setDirWritable] = useState(true);
   const [fileWritable, setFileWritable] = useState(true);
 
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<{ path: string; name: string; is_dir: boolean }[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchSelectedIndex, setSearchSelectedIndex] = useState(-1);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchPrefixRef = useRef("");
+
   const isPermissionError = (err: unknown): boolean => {
     const msg = String(err).toLowerCase();
     return msg.includes("permission denied") || msg.includes("operation not permitted");
@@ -126,6 +134,20 @@ function App() {
     loadSavedConnections();
     loadSshKeys();
   }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f" && connected) {
+        e.preventDefault();
+        setShowSearch(prev => {
+          if (prev) { setSearchQuery(""); setSearchResults([]); }
+          return !prev;
+        });
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [connected]);
 
   const loadSshKeys = async () => {
     try {
@@ -352,42 +374,7 @@ function App() {
     closeEditor();
   };
 
-  const openFile = async (file: FileEntry) => {
-    if (file.is_dir) {
-      const newPath =
-        currentPath === "/"
-          ? `/${file.name}`
-          : `${currentPath}/${file.name}`;
-      listFiles(newPath);
-      return;
-    }
-
-    const filePath =
-      currentPath === "/"
-        ? `/${file.name}`
-        : `${currentPath}/${file.name}`;
-
-    setError("");
-    try {
-      let content: string;
-      try {
-        content = await invoke("read_file", { path: filePath });
-      } catch (e) {
-        if (isPermissionError(e) && sudoPassword) {
-          content = await invoke("sudo_read_file", { path: filePath, sudoPassword });
-        } else {
-          throw e;
-        }
-      }
-      setEditingContent(content);
-      setEditingFile(filePath);
-      setEditorDirty(false);
-      const writable: boolean = await invoke("check_writable", { path: filePath });
-      setFileWritable(writable);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
+  const openFile = (file: FileEntry) => handleOpenFile(file);
 
   const saveFile = async () => {
     if (!editingFile || !editorViewRef.current) return;
@@ -497,6 +484,91 @@ function App() {
     const segments = currentPath.split("/").filter(Boolean);
     const path = "/" + segments.slice(0, index + 1).join("/");
     listFiles(path);
+  };
+
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    if (!query.trim()) {
+      setSearchResults([]);
+      setSearching(false);
+      setSearchSelectedIndex(-1);
+      return;
+    }
+    setSearching(true);
+    const trimmed = query.trim();
+    const slashIdx = trimmed.lastIndexOf("/");
+    searchPrefixRef.current = slashIdx !== -1 ? trimmed.substring(0, slashIdx + 1) : "";
+    searchTimerRef.current = setTimeout(async () => {
+      try {
+        let searchPath = currentPath;
+        let searchTerm = trimmed;
+        const slashIdx = searchTerm.lastIndexOf("/");
+        if (slashIdx !== -1) {
+          const dirPart = searchTerm.substring(0, slashIdx);
+          searchTerm = searchTerm.substring(slashIdx + 1);
+          if (dirPart.startsWith("/")) {
+            searchPath = dirPart || "/";
+          } else {
+            searchPath = currentPath === "/" ? `/${dirPart}` : `${currentPath}/${dirPart}`;
+          }
+        }
+        if (!searchTerm) searchTerm = "*";
+        const results: { path: string; name: string; is_dir: boolean }[] = await invoke("search_files", {
+          query: searchTerm,
+          searchPath,
+        });
+        setSearchResults(results);
+        setSearchSelectedIndex(-1);
+      } catch (e) {
+        setSearchResults([]);
+        setSearchSelectedIndex(-1);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+  };
+
+  const handleSearchSelect = (result: { path: string; name: string; is_dir: boolean }) => {
+    setShowSearch(false);
+    setSearchQuery("");
+    setSearchResults([]);
+    if (result.is_dir) {
+      listFiles(result.path);
+    } else {
+      const parent = result.path.substring(0, result.path.lastIndexOf("/")) || "/";
+      listFiles(parent);
+      handleOpenFile({ name: result.name, is_dir: false, size: 0, modified: "", permissions: "" }, parent);
+    }
+  };
+
+  const handleOpenFile = async (file: FileEntry, fromPath?: string) => {
+    const dir = fromPath || currentPath;
+    const filePath = dir === "/" ? `/${file.name}` : `${dir}/${file.name}`;
+    if (file.is_dir) {
+      listFiles(filePath);
+      return;
+    }
+    setError("");
+    try {
+      let content: string;
+      try {
+        content = await invoke("read_file", { path: filePath });
+      } catch (e) {
+        if (isPermissionError(e) && sudoPassword) {
+          content = await invoke("sudo_read_file", { path: filePath, sudoPassword });
+        } else {
+          throw e;
+        }
+      }
+      setEditingFile(filePath);
+      setEditingContent(content);
+      setEditorDirty(false);
+      const writable: boolean = await invoke("check_writable", { path: filePath });
+      setFileWritable(writable);
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const pathSegments = currentPath.split("/").filter(Boolean);
@@ -734,6 +806,17 @@ function App() {
         </div>
 
         {/* Action buttons */}
+        <div className="relative">
+          <button
+            onClick={() => { setShowSearch(!showSearch); if (showSearch) { setSearchQuery(""); setSearchResults([]); } }}
+            className={`px-2 py-1.5 text-xs rounded-md transition cursor-pointer ${showSearch ? "text-emerald-400 bg-zinc-700" : "text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700"}`}
+            title="Search files (Ctrl+F)"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </button>
+        </div>
         <button
           onClick={() => listFiles(currentPath)}
           className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
@@ -773,6 +856,78 @@ function App() {
           Disconnect
         </button>
       </div>
+
+      {/* Search bar */}
+      {showSearch && (
+        <div className="relative px-4 py-2.5 bg-zinc-900/80 border-b border-zinc-800">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-zinc-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => handleSearch(e.target.value)}
+              placeholder={`Search in ${currentPath}  ·  Use /path/ prefix to search elsewhere`}
+              autoFocus
+              className="flex-1 px-2.5 py-1.5 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchResults([]); setSearchSelectedIndex(-1); }
+                if (e.key === "Tab" && searchResults.length > 0) {
+                  e.preventDefault();
+                  const nextIdx = e.shiftKey
+                    ? (searchSelectedIndex <= 0 ? searchResults.length - 1 : searchSelectedIndex - 1)
+                    : (searchSelectedIndex + 1) % searchResults.length;
+                  setSearchSelectedIndex(nextIdx);
+                  const result = searchResults[nextIdx];
+                  setSearchQuery(searchPrefixRef.current + result.name + (result.is_dir ? "/" : ""));
+                }
+                if (e.key === "Enter" && searchSelectedIndex >= 0 && searchSelectedIndex < searchResults.length) {
+                  e.preventDefault();
+                  handleSearchSelect(searchResults[searchSelectedIndex]);
+                }
+              }}
+            />
+            {searching && <span className="text-xs text-zinc-500 shrink-0">Searching...</span>}
+            <button
+              onClick={() => { setShowSearch(false); setSearchQuery(""); setSearchResults([]); }}
+              className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white transition cursor-pointer"
+            >
+              Cancel
+            </button>
+          </div>
+          {searchResults.length > 0 && (
+            <div className="absolute left-0 right-0 top-full z-50 mx-4 mt-1 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl max-h-64 overflow-y-auto">
+              {searchResults.map((result, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleSearchSelect(result)}
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition cursor-pointer first:rounded-t-lg last:rounded-b-lg ${i === searchSelectedIndex ? "bg-zinc-600" : "hover:bg-zinc-700"}`}
+                >
+                  <span className={`shrink-0 ${result.is_dir ? "text-blue-400" : "text-zinc-400"}`}>
+                    {result.is_dir ? (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                      </svg>
+                    )}
+                  </span>
+                  <span className="text-white truncate">{result.name}</span>
+                  <span className="text-xs text-zinc-500 truncate ml-auto">{result.path}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {searchQuery && !searching && searchResults.length === 0 && (
+            <div className="absolute left-0 right-0 top-full z-50 mx-4 mt-1 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl px-3 py-2 text-sm text-zinc-500">
+              No results found
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Save connection inline form */}
       {showSaveForm && (
