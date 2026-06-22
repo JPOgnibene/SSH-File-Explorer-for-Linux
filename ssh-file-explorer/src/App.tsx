@@ -98,9 +98,32 @@ function App() {
 
   const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
 
+  const [dirWritable, setDirWritable] = useState(true);
+  const [fileWritable, setFileWritable] = useState(true);
+
+  const isPermissionError = (err: unknown): boolean => {
+    const msg = String(err).toLowerCase();
+    return msg.includes("permission denied") || msg.includes("operation not permitted");
+  };
+
   useEffect(() => {
     loadSavedConnections();
   }, []);
+
+  useEffect(() => {
+    if (!connected) return;
+    const interval = setInterval(async () => {
+      try {
+        const entries: FileEntry[] = await invoke("list_directory", { path: currentPath });
+        entries.sort((a, b) => {
+          if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        setFiles(entries);
+      } catch {}
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [connected, currentPath]);
 
   useEffect(() => {
     if (!editingFile || !editorRef.current) return;
@@ -166,6 +189,8 @@ function App() {
       });
       setFiles(entries);
       setCurrentPath(path);
+      const writable: boolean = await invoke("check_writable", { path });
+      setDirWritable(writable);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -266,10 +291,21 @@ function App() {
 
     setError("");
     try {
-      const content: string = await invoke("read_file", { path: filePath });
+      let content: string;
+      try {
+        content = await invoke("read_file", { path: filePath });
+      } catch (e) {
+        if (isPermissionError(e)) {
+          content = await invoke("sudo_read_file", { path: filePath, sudoPassword: password });
+        } else {
+          throw e;
+        }
+      }
       setEditingContent(content);
       setEditingFile(filePath);
       setEditorDirty(false);
+      const writable: boolean = await invoke("check_writable", { path: filePath });
+      setFileWritable(writable);
     } catch (e) {
       setError(String(e));
     }
@@ -281,7 +317,15 @@ function App() {
     setError("");
     try {
       const content = editorViewRef.current.state.doc.toString();
-      await invoke("write_file", { path: editingFile, content });
+      try {
+        await invoke("write_file", { path: editingFile, content });
+      } catch (e) {
+        if (isPermissionError(e)) {
+          await invoke("sudo_write_file", { path: editingFile, content, sudoPassword: password });
+        } else {
+          throw e;
+        }
+      }
       setEditorDirty(false);
       await listFiles(currentPath);
     } catch (e) {
@@ -295,6 +339,7 @@ function App() {
     setEditingFile(null);
     setEditingContent("");
     setEditorDirty(false);
+    setFileWritable(true);
   };
 
   const handleCreateFile = async () => {
@@ -304,10 +349,23 @@ function App() {
       currentPath === "/" ? `/${name}` : `${currentPath}/${name}`;
     setError("");
     try {
-      if (name.endsWith("/")) {
-        await invoke("create_directory", { path: fullPath });
-      } else {
-        await invoke("create_file", { path: fullPath });
+      const isDir = name.endsWith("/");
+      try {
+        if (isDir) {
+          await invoke("create_directory", { path: fullPath });
+        } else {
+          await invoke("create_file", { path: fullPath });
+        }
+      } catch (e) {
+        if (isPermissionError(e)) {
+          if (isDir) {
+            await invoke("sudo_create_directory", { path: fullPath, sudoPassword: password });
+          } else {
+            await invoke("sudo_create_file", { path: fullPath, sudoPassword: password });
+          }
+        } else {
+          throw e;
+        }
       }
       setNewFileName("");
       setShowNewFileInput(false);
@@ -324,13 +382,22 @@ function App() {
         : `${currentPath}/${file.name}`;
     setError("");
     try {
-      await invoke("delete_file", { path: filePath, isDir: file.is_dir });
+      try {
+        await invoke("delete_file", { path: filePath, isDir: file.is_dir });
+      } catch (e) {
+        if (isPermissionError(e)) {
+          await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword: password });
+        } else {
+          throw e;
+        }
+      }
       setConfirmDelete(null);
       if (editingFile === filePath) {
         closeEditor();
       }
       await listFiles(currentPath);
     } catch (e) {
+      setConfirmDelete(null);
       setError(String(e));
     }
   };
@@ -504,6 +571,15 @@ function App() {
 
         {/* Action buttons */}
         <button
+          onClick={() => listFiles(currentPath)}
+          className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          title="Refresh"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+        </button>
+        <button
           onClick={() => {
             setShowNewFileInput(true);
             setNewFileName("");
@@ -608,6 +684,18 @@ function App() {
       {error && (
         <div className="mx-4 mt-3 px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
           {error}
+        </div>
+      )}
+
+      {/* Protected directory warning */}
+      {!dirWritable && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20">
+          <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-xs text-amber-400">
+            This directory is protected — actions will use elevated privileges (sudo)
+          </span>
         </div>
       )}
 
@@ -743,6 +831,14 @@ function App() {
               <span className="text-sm text-zinc-300 truncate flex-1">
                 {editingFile.split("/").pop()}
               </span>
+              {!fileWritable && (
+                <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-500/15 border border-amber-500/30 rounded text-[10px] text-amber-400 shrink-0">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                  Protected
+                </span>
+              )}
               {editorDirty && (
                 <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" title="Unsaved changes" />
               )}

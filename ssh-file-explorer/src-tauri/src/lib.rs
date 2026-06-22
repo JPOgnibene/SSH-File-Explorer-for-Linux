@@ -165,6 +165,43 @@ async fn exec_ssh(session: &russh::client::Handle<ClientHandler>, cmd: &str) -> 
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
+async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password: &str, cmd: &str) -> Result<String, String> {
+    let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+    let escaped_cmd = cmd.replace("'", "'\"'\"'");
+    let sudo_cmd = format!("sudo -S sh -c '{}'", escaped_cmd);
+    channel.exec(true, sudo_cmd.as_bytes()).await.map_err(|e| format!("Exec error: {}", e))?;
+
+    let mut stream = channel.into_stream();
+    use tokio::io::{AsyncWriteExt, AsyncReadExt};
+    stream.write_all(format!("{}\n", password).as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
+
+    let mut output = Vec::new();
+    let mut buf = vec![0u8; 65536];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => output.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+
+    let text = String::from_utf8_lossy(&output).into_owned();
+    let filtered: String = text.lines()
+        .filter(|line| !line.contains("[sudo] password for"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(filtered)
+}
+
+#[tauri::command]
+async fn check_writable(path: String, state: State<'_, SshSession>) -> Result<bool, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("test -w {} && echo 'y' || echo 'n'", shell_escape(&path));
+    let output = exec_ssh(session, &cmd).await?;
+    Ok(output.trim() == "y")
+}
+
 #[tauri::command]
 async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Vec<FileEntry>, String> {
     let s = state.lock().await;
@@ -221,8 +258,12 @@ async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Ve
 async fn read_file(path: String, state: State<'_, SshSession>) -> Result<String, String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let cmd = format!("cat {}", shell_escape(&path));
-    exec_ssh(session, &cmd).await
+    let cmd = format!("cat {} 2>&1", shell_escape(&path));
+    let output = exec_ssh(session, &cmd).await?;
+    if output.starts_with("cat:") && (output.contains("Permission denied") || output.contains("No such file")) {
+        return Err(output.trim().to_string());
+    }
+    Ok(output)
 }
 
 #[tauri::command]
@@ -231,13 +272,27 @@ async fn write_file(path: String, content: String, state: State<'_, SshSession>)
     let session = s.session.as_ref().ok_or("Not connected")?;
 
     let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
-    let cmd = format!("cat > {}", shell_escape(&path));
+    let cmd = format!("sh -c 'cat > {}' 2>&1", shell_escape(&path));
     channel.exec(true, cmd.as_bytes()).await.map_err(|e| format!("Exec error: {}", e))?;
 
     let mut stream = channel.into_stream();
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncWriteExt, AsyncReadExt};
     stream.write_all(content.as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
     stream.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+
+    let mut err_output = Vec::new();
+    let mut buf = vec![0u8; 4096];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => err_output.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    let err_text = String::from_utf8_lossy(&err_output).trim().to_string();
+    if !err_text.is_empty() {
+        return Err(err_text);
+    }
 
     Ok(())
 }
@@ -247,8 +302,11 @@ async fn create_file(path: String, state: State<'_, SshSession>) -> Result<(), S
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
     let escaped = shell_escape(&path);
-    let cmd = format!("mkdir -p \"$(dirname {})\" && touch {}", escaped, escaped);
-    exec_ssh(session, &cmd).await?;
+    let cmd = format!("mkdir -p \"$(dirname {})\" && touch {} 2>&1", escaped, escaped);
+    let output = exec_ssh(session, &cmd).await?;
+    if !output.trim().is_empty() {
+        return Err(output.trim().to_string());
+    }
     Ok(())
 }
 
@@ -256,8 +314,11 @@ async fn create_file(path: String, state: State<'_, SshSession>) -> Result<(), S
 async fn create_directory(path: String, state: State<'_, SshSession>) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let cmd = format!("mkdir -p {}", shell_escape(&path));
-    exec_ssh(session, &cmd).await?;
+    let cmd = format!("mkdir -p {} 2>&1", shell_escape(&path));
+    let output = exec_ssh(session, &cmd).await?;
+    if !output.trim().is_empty() {
+        return Err(output.trim().to_string());
+    }
     Ok(())
 }
 
@@ -266,11 +327,99 @@ async fn delete_file(path: String, is_dir: bool, state: State<'_, SshSession>) -
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
     let cmd = if is_dir {
-        format!("rm -rf {}", shell_escape(&path))
+        format!("rm -rf {} 2>&1", shell_escape(&path))
     } else {
-        format!("rm -f {}", shell_escape(&path))
+        format!("rm -f {} 2>&1", shell_escape(&path))
     };
-    exec_ssh(session, &cmd).await?;
+    let output = exec_ssh(session, &cmd).await?;
+    if !output.trim().is_empty() {
+        return Err(output.trim().to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sudo_read_file(path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<String, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("cat {}", shell_escape(&path));
+    sudo_exec_ssh(session, &sudo_password, &cmd).await
+}
+
+#[tauri::command]
+async fn sudo_write_file(path: String, content: String, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+    let escaped_path = shell_escape(&path).replace("'", "'\"'\"'");
+    let cmd = format!("sudo -S sh -c 'cat > {}' 2>&1", escaped_path);
+    channel.exec(true, cmd.as_bytes()).await.map_err(|e| format!("Exec error: {}", e))?;
+
+    let mut stream = channel.into_stream();
+    use tokio::io::{AsyncWriteExt, AsyncReadExt};
+    stream.write_all(format!("{}\n", sudo_password).as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
+    stream.write_all(content.as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
+    stream.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+
+    let mut err_output = Vec::new();
+    let mut buf = vec![0u8; 4096];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => err_output.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    let err_text = String::from_utf8_lossy(&err_output).trim().to_string();
+    let err_text = err_text.lines()
+        .filter(|line| !line.contains("[sudo] password for"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !err_text.trim().is_empty() {
+        return Err(err_text.trim().to_string());
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn sudo_create_file(path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let escaped = shell_escape(&path);
+    let cmd = format!("mkdir -p \"$(dirname {})\" && touch {} 2>&1", escaped, escaped);
+    let output = sudo_exec_ssh(session, &sudo_password, &cmd).await?;
+    if !output.trim().is_empty() {
+        return Err(output.trim().to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sudo_create_directory(path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("mkdir -p {} 2>&1", shell_escape(&path));
+    let output = sudo_exec_ssh(session, &sudo_password, &cmd).await?;
+    if !output.trim().is_empty() {
+        return Err(output.trim().to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sudo_delete_file(path: String, is_dir: bool, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = if is_dir {
+        format!("rm -rf {} 2>&1", shell_escape(&path))
+    } else {
+        format!("rm -f {} 2>&1", shell_escape(&path))
+    };
+    let output = sudo_exec_ssh(session, &sudo_password, &cmd).await?;
+    if !output.trim().is_empty() {
+        return Err(output.trim().to_string());
+    }
     Ok(())
 }
 
@@ -331,12 +480,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ssh_connect,
             ssh_disconnect,
+            check_writable,
             list_directory,
             read_file,
             write_file,
             create_file,
             create_directory,
             delete_file,
+            sudo_read_file,
+            sudo_write_file,
+            sudo_create_file,
+            sudo_create_directory,
+            sudo_delete_file,
             get_saved_connections,
             save_connection,
             delete_connection,
