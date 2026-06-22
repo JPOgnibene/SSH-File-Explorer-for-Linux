@@ -327,28 +327,60 @@ async fn exec_ssh(session: &russh::client::Handle<ClientHandler>, cmd: &str) -> 
 async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password: &str, cmd: &str) -> Result<String, String> {
     let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
     let escaped_cmd = cmd.replace("'", "'\"'\"'");
-    let sudo_cmd = format!("sudo -S sh -c '{}'", escaped_cmd);
+    let escaped_pw = password.replace("'", "'\\''");
+    let sudo_cmd = format!(
+        "printf '%s\\n' '{}' | sudo -S sh -c '{}' 2>&1; echo \"SUDO_EXIT:$?\"",
+        escaped_pw,
+        escaped_cmd
+    );
     channel.exec(true, sudo_cmd.as_bytes()).await.map_err(|e| format!("Exec error: {}", e))?;
 
     let mut stream = channel.into_stream();
-    use tokio::io::{AsyncWriteExt, AsyncReadExt};
-    stream.write_all(format!("{}\n", password).as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
-
+    use tokio::io::AsyncReadExt;
     let mut output = Vec::new();
     let mut buf = vec![0u8; 65536];
-    loop {
-        match stream.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => output.extend_from_slice(&buf[..n]),
-            Err(_) => break,
+    let read_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => output.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
         }
+    }).await;
+
+    if read_result.is_err() {
+        return Err("Sudo operation timed out".into());
     }
 
     let text = String::from_utf8_lossy(&output).into_owned();
+    let lower = text.to_lowercase();
+    if lower.contains("sorry, try again")
+        || lower.contains("is not in the sudoers file")
+        || lower.contains("incorrect password")
+        || lower.contains("authentication failure")
+    {
+        return Err("Sudo authentication failed — incorrect password or insufficient privileges".into());
+    }
+
+    let mut exit_code = 0;
     let filtered: String = text.lines()
-        .filter(|line| !line.contains("[sudo] password for"))
+        .filter(|line| {
+            if let Some(code) = line.strip_prefix("SUDO_EXIT:") {
+                exit_code = code.trim().parse::<i32>().unwrap_or(1);
+                return false;
+            }
+            !line.contains("[sudo] password for")
+        })
         .collect::<Vec<_>>()
         .join("\n");
+
+    if exit_code != 0 && !filtered.trim().is_empty() {
+        return Err(filtered.trim().to_string());
+    }
+    if exit_code != 0 {
+        return Err("Sudo command failed".into());
+    }
     Ok(filtered)
 }
 
@@ -460,8 +492,11 @@ async fn write_file(path: String, content: String, state: State<'_, SshSession>)
 async fn create_file(path: String, state: State<'_, SshSession>) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let escaped = shell_escape(&path);
-    let cmd = format!("mkdir -p \"$(dirname {})\" && touch {} 2>&1", escaped, escaped);
+    let parent = match path.rfind('/') {
+        Some(pos) if pos > 0 => &path[..pos],
+        _ => "/",
+    };
+    let cmd = format!("mkdir -p {} 2>&1 && touch {} 2>&1", shell_escape(parent), shell_escape(&path));
     let output = exec_ssh(session, &cmd).await?;
     if !output.trim().is_empty() {
         return Err(output.trim().to_string());
@@ -509,35 +544,9 @@ async fn sudo_read_file(path: String, sudo_password: String, state: State<'_, Ss
 async fn sudo_write_file(path: String, content: String, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
-    let escaped_path = shell_escape(&path).replace("'", "'\"'\"'");
-    let cmd = format!("sudo -S sh -c 'cat > {}' 2>&1", escaped_path);
-    channel.exec(true, cmd.as_bytes()).await.map_err(|e| format!("Exec error: {}", e))?;
-
-    let mut stream = channel.into_stream();
-    use tokio::io::{AsyncWriteExt, AsyncReadExt};
-    stream.write_all(format!("{}\n", sudo_password).as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
-    stream.write_all(content.as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
-    stream.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
-
-    let mut err_output = Vec::new();
-    let mut buf = vec![0u8; 4096];
-    loop {
-        match stream.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => err_output.extend_from_slice(&buf[..n]),
-            Err(_) => break,
-        }
-    }
-    let err_text = String::from_utf8_lossy(&err_output).trim().to_string();
-    let err_text = err_text.lines()
-        .filter(|line| !line.contains("[sudo] password for"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !err_text.trim().is_empty() {
-        return Err(err_text.trim().to_string());
-    }
-
+    let escaped_content = content.replace("'", "'\\''");
+    let cmd = format!("printf '%s' '{}' > {}", escaped_content, shell_escape(&path));
+    sudo_exec_ssh(session, &sudo_password, &cmd).await?;
     Ok(())
 }
 
@@ -545,12 +554,12 @@ async fn sudo_write_file(path: String, content: String, sudo_password: String, s
 async fn sudo_create_file(path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let escaped = shell_escape(&path);
-    let cmd = format!("mkdir -p \"$(dirname {})\" && touch {} 2>&1", escaped, escaped);
-    let output = sudo_exec_ssh(session, &sudo_password, &cmd).await?;
-    if !output.trim().is_empty() {
-        return Err(output.trim().to_string());
-    }
+    let parent = match path.rfind('/') {
+        Some(pos) if pos > 0 => &path[..pos],
+        _ => "/",
+    };
+    let cmd = format!("mkdir -p {} && touch {}", shell_escape(parent), shell_escape(&path));
+    sudo_exec_ssh(session, &sudo_password, &cmd).await?;
     Ok(())
 }
 
@@ -558,11 +567,8 @@ async fn sudo_create_file(path: String, sudo_password: String, state: State<'_, 
 async fn sudo_create_directory(path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let cmd = format!("mkdir -p {} 2>&1", shell_escape(&path));
-    let output = sudo_exec_ssh(session, &sudo_password, &cmd).await?;
-    if !output.trim().is_empty() {
-        return Err(output.trim().to_string());
-    }
+    let cmd = format!("mkdir -p {}", shell_escape(&path));
+    sudo_exec_ssh(session, &sudo_password, &cmd).await?;
     Ok(())
 }
 
@@ -571,14 +577,11 @@ async fn sudo_delete_file(path: String, is_dir: bool, sudo_password: String, sta
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
     let cmd = if is_dir {
-        format!("rm -rf {} 2>&1", shell_escape(&path))
+        format!("rm -rf {}", shell_escape(&path))
     } else {
-        format!("rm -f {} 2>&1", shell_escape(&path))
+        format!("rm -f {}", shell_escape(&path))
     };
-    let output = sudo_exec_ssh(session, &sudo_password, &cmd).await?;
-    if !output.trim().is_empty() {
-        return Err(output.trim().to_string());
-    }
+    sudo_exec_ssh(session, &sudo_password, &cmd).await?;
     Ok(())
 }
 

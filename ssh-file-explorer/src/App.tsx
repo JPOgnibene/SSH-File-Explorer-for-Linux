@@ -92,7 +92,6 @@ function App() {
   const [selectedKeyPath, setSelectedKeyPath] = useState("");
   const [keyPassphrase, setKeyPassphrase] = useState("");
   const [sudoPassword, setSudoPassword] = useState("");
-  const [showSudoPrompt, setShowSudoPrompt] = useState(false);
 
   const [currentPath, setCurrentPath] = useState("/");
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -122,11 +121,6 @@ function App() {
     return msg.includes("permission denied") || msg.includes("operation not permitted");
   };
 
-  const requireSudoPassword = (): boolean => {
-    if (sudoPassword) return true;
-    setShowSudoPrompt(true);
-    return false;
-  };
 
   useEffect(() => {
     loadSavedConnections();
@@ -265,7 +259,6 @@ function App() {
       setPort(String(p));
       setUsername(u);
       setPassword("");
-      setSudoPassword("");
       setConnected(true);
       await listFiles("/");
     } catch (e) {
@@ -286,6 +279,12 @@ function App() {
 
   const handleSavedConnect = async (conn: SavedConnection) => {
     if (conn.auth_method === "key" && conn.key_path) {
+      if (conn.has_password) {
+        try {
+          const pw: string = await invoke("get_connection_password", { id: conn.id });
+          setSudoPassword(pw);
+        } catch (_) {}
+      }
       await doConnectKey(conn.host, conn.port, conn.username, conn.key_path, null);
     } else if (conn.has_password) {
       try {
@@ -317,7 +316,9 @@ function App() {
         host,
         port: parseInt(port),
         username,
-        password: (authMethod === "password" && savePassword) ? password : null,
+        password: authMethod === "password"
+          ? (savePassword ? password : null)
+          : (sudoPassword || null),
         authMethod,
         keyPath: authMethod === "key" ? selectedKeyPath : null,
       });
@@ -348,7 +349,6 @@ function App() {
     setCurrentPath("/");
     setError("");
     setSudoPassword("");
-    setShowSudoPrompt(false);
     closeEditor();
   };
 
@@ -373,8 +373,8 @@ function App() {
       try {
         content = await invoke("read_file", { path: filePath });
       } catch (e) {
-        if (isPermissionError(e) && requireSudoPassword()) {
-          content = await invoke("sudo_read_file", { path: filePath, sudoPassword: sudoPassword });
+        if (isPermissionError(e) && sudoPassword) {
+          content = await invoke("sudo_read_file", { path: filePath, sudoPassword });
         } else {
           throw e;
         }
@@ -398,8 +398,8 @@ function App() {
       try {
         await invoke("write_file", { path: editingFile, content });
       } catch (e) {
-        if (isPermissionError(e) && requireSudoPassword()) {
-          await invoke("sudo_write_file", { path: editingFile, content, sudoPassword: sudoPassword });
+        if (isPermissionError(e) && sudoPassword) {
+          await invoke("sudo_write_file", { path: editingFile, content, sudoPassword });
         } else {
           throw e;
         }
@@ -435,11 +435,11 @@ function App() {
           await invoke("create_file", { path: fullPath });
         }
       } catch (e) {
-        if (isPermissionError(e) && requireSudoPassword()) {
+        if (isPermissionError(e) && sudoPassword) {
           if (isDir) {
-            await invoke("sudo_create_directory", { path: fullPath, sudoPassword: sudoPassword });
+            await invoke("sudo_create_directory", { path: fullPath, sudoPassword });
           } else {
-            await invoke("sudo_create_file", { path: fullPath, sudoPassword: sudoPassword });
+            await invoke("sudo_create_file", { path: fullPath, sudoPassword });
           }
         } else {
           throw e;
@@ -447,7 +447,14 @@ function App() {
       }
       setNewFileName("");
       setShowNewFileInput(false);
-      await listFiles(currentPath);
+      // If a nested path like "dir/file.txt" was created, navigate to the parent dir
+      const slashIdx = name.indexOf("/");
+      if (!isDir && slashIdx !== -1) {
+        const targetDir = fullPath.substring(0, fullPath.lastIndexOf("/"));
+        await listFiles(targetDir);
+      } else {
+        await listFiles(currentPath);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -463,8 +470,8 @@ function App() {
       try {
         await invoke("delete_file", { path: filePath, isDir: file.is_dir });
       } catch (e) {
-        if (isPermissionError(e) && requireSudoPassword()) {
-          await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword: sudoPassword });
+        if (isPermissionError(e) && sudoPassword) {
+          await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword });
         } else {
           throw e;
         }
@@ -668,10 +675,10 @@ function App() {
                       type="password"
                       value={sudoPassword}
                       onChange={(e) => setSudoPassword(e.target.value)}
-                      placeholder="For elevated file operations"
+                      placeholder="Account password for sudo"
                       className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition"
                     />
-                    <p className="text-xs text-zinc-600 mt-1">You'll be prompted later if needed</p>
+                    <p className="text-xs text-zinc-500 mt-1">Not used for login — only for elevated file operations (sudo). Without this, actions on protected files will be denied.</p>
                   </div>
                 </>
               )}
@@ -855,45 +862,6 @@ function App() {
           <span className="text-xs text-amber-400">
             This directory is protected — actions will use elevated privileges (sudo)
           </span>
-        </div>
-      )}
-
-      {/* Sudo password prompt modal */}
-      {showSudoPrompt && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-sm w-full mx-4 shadow-2xl">
-            <h3 className="text-white font-medium mb-2">Sudo Password Required</h3>
-            <p className="text-sm text-zinc-400 mb-4">
-              This action requires elevated privileges. Enter your account password for the remote machine.
-            </p>
-            <input
-              type="password"
-              value={sudoPassword}
-              onChange={(e) => setSudoPassword(e.target.value)}
-              placeholder="Account password"
-              autoFocus
-              className="w-full px-3 py-2.5 bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition mb-4"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && sudoPassword) setShowSudoPrompt(false);
-                if (e.key === "Escape") setShowSudoPrompt(false);
-              }}
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => { setSudoPassword(""); setShowSudoPrompt(false); }}
-                className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => setShowSudoPrompt(false)}
-                disabled={!sudoPassword}
-                className="px-4 py-2 text-sm text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition cursor-pointer"
-              >
-                Submit
-              </button>
-            </div>
-          </div>
         </div>
       )}
 
