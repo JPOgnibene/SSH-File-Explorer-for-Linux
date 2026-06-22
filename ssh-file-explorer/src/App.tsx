@@ -27,7 +27,7 @@ interface SavedConnection {
   host: string;
   port: number;
   username: string;
-  password: string | null;
+  has_password: boolean;
 }
 
 function formatSize(bytes: number): string {
@@ -222,8 +222,17 @@ function App() {
   };
 
   const handleSavedConnect = async (conn: SavedConnection) => {
-    if (conn.password) {
-      await doConnect(conn.host, conn.port, conn.username, conn.password);
+    if (conn.has_password) {
+      try {
+        const pw: string = await invoke("get_connection_password", { id: conn.id });
+        await doConnect(conn.host, conn.port, conn.username, pw);
+      } catch (e) {
+        setHost(conn.host);
+        setPort(String(conn.port));
+        setUsername(conn.username);
+        setPassword("");
+        setError(String(e));
+      }
     } else {
       setHost(conn.host);
       setPort(String(conn.port));
@@ -442,7 +451,7 @@ function App() {
                       <div className="text-sm text-white font-medium truncate">{conn.label}</div>
                       <div className="text-xs text-zinc-500 truncate">
                         {conn.username}@{conn.host}:{conn.port}
-                        {!conn.password && " (password required)"}
+                        {!conn.has_password && " (password required)"}
                       </div>
                     </div>
                     <div
