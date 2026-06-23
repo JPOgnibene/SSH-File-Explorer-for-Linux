@@ -11,6 +11,7 @@ import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 import { xml } from "@codemirror/lang-xml";
 import { markdown } from "@codemirror/lang-markdown";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
 interface FileEntry {
@@ -571,6 +572,31 @@ function App() {
     }
   };
 
+  const handleDownload = async (file: FileEntry) => {
+    const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+    try {
+      const localPath = await save({ defaultPath: file.name });
+      if (!localPath) return;
+      await invoke("download_file", { remotePath, localPath });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleUpload = async () => {
+    try {
+      const selected = await open({ multiple: false, directory: false });
+      if (!selected) return;
+      const localPath = String(selected);
+      const fileName = localPath.replace(/\\/g, "/").split("/").pop() || "uploaded_file";
+      const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
+      await invoke("upload_file", { localPath, remotePath });
+      await listFiles(currentPath);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const pathSegments = currentPath.split("/").filter(Boolean);
 
   if (!connected) {
@@ -835,6 +861,13 @@ function App() {
           title="New file or folder"
         >
           + New File/Folder
+        </button>
+        <button
+          onClick={handleUpload}
+          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          title="Upload file"
+        >
+          Upload
         </button>
 
         {!showSaveForm && (
@@ -1121,17 +1154,33 @@ function App() {
                       </>
                     )}
                     <td className="py-2 px-2">
-                      <div
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setConfirmDelete(file);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
-                        title={`Delete ${file.name}`}
-                      >
-                        <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
+                      <div className="flex items-center gap-1">
+                        {!file.is_dir && (
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDownload(file);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
+                            title={`Download ${file.name}`}
+                          >
+                            <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                          </div>
+                        )}
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDelete(file);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
+                          title={`Delete ${file.name}`}
+                        >
+                          <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </div>
                       </div>
                     </td>
                   </tr>

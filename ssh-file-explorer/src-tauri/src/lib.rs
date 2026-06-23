@@ -6,6 +6,7 @@ use tauri::{AppHandle, Manager, State};
 
 struct SshState {
     session: Option<russh::client::Handle<ClientHandler>>,
+    sftp: Option<russh_sftp::client::SftpSession>,
 }
 
 struct ClientHandler;
@@ -247,8 +248,13 @@ async fn ssh_connect(
         return Err("Authentication failed: invalid credentials".into());
     }
 
+    let sftp_channel = session.channel_open_session().await.map_err(|e| format!("SFTP channel error: {}", e))?;
+    sftp_channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
+    let sftp = russh_sftp::client::SftpSession::new(sftp_channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?;
+
     let mut s = state.lock().await;
     s.session = Some(session);
+    s.sftp = Some(sftp);
     Ok(())
 }
 
@@ -288,14 +294,20 @@ async fn ssh_connect_key(
         return Err("Authentication failed: key not accepted by server".into());
     }
 
+    let sftp_channel = session.channel_open_session().await.map_err(|e| format!("SFTP channel error: {}", e))?;
+    sftp_channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
+    let sftp = russh_sftp::client::SftpSession::new(sftp_channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?;
+
     let mut s = state.lock().await;
     s.session = Some(session);
+    s.sftp = Some(sftp);
     Ok(())
 }
 
 #[tauri::command]
 async fn ssh_disconnect(state: State<'_, SshSession>) -> Result<(), String> {
     let mut s = state.lock().await;
+    s.sftp.take();
     if let Some(session) = s.session.take() {
         let _ = session
             .disconnect(Disconnect::ByApplication, "User disconnected", "")
@@ -623,6 +635,27 @@ async fn search_files(query: String, search_path: String, state: State<'_, SshSe
     Ok(results)
 }
 
+#[tauri::command]
+async fn download_file(remote_path: String, local_path: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let sftp = s.sftp.as_ref().ok_or("SFTP not connected")?;
+    let data = sftp.read(&remote_path).await.map_err(|e| format!("Download failed: {}", e))?;
+    std::fs::write(&local_path, &data).map_err(|e| format!("Failed to save file: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn upload_file(local_path: String, remote_path: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let data = std::fs::read(&local_path).map_err(|e| format!("Failed to read local file '{}': {}", local_path, e))?;
+    let s = state.lock().await;
+    let sftp = s.sftp.as_ref().ok_or("SFTP not connected")?;
+    use tokio::io::AsyncWriteExt;
+    let mut file = sftp.create(&remote_path).await.map_err(|e| format!("Failed to create remote file: {}", e))?;
+    file.write_all(&data).await.map_err(|e| format!("Upload write failed: {}", e))?;
+    file.shutdown().await.map_err(|e| format!("Upload close failed: {}", e))?;
+    Ok(())
+}
+
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -676,7 +709,8 @@ fn format_permissions(mode: &str, is_dir: bool) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(Arc::new(Mutex::new(SshState { session: None })) as SshSession)
+        .plugin(tauri_plugin_dialog::init())
+        .manage(Arc::new(Mutex::new(SshState { session: None, sftp: None })) as SshSession)
         .invoke_handler(tauri::generate_handler![
             discover_ssh_keys,
             ssh_connect,
@@ -695,6 +729,8 @@ pub fn run() {
             sudo_create_directory,
             sudo_delete_file,
             search_files,
+            download_file,
+            upload_file,
             get_saved_connections,
             save_connection,
             get_connection_password,

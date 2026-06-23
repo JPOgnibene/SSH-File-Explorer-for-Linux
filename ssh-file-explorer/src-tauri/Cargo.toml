@@ -28,4 +28,6 @@ tokio = { version = "1.52.3", features = ["full"] }
 async-trait = "0.1.89"
 keyring = { version = "3", features = ["sync-secret-service", "windows-native", "apple-native"] }
 dirs = "6"
+russh-sftp = "2.3.0"
+tauri-plugin-dialog = "2.7.1"
 
