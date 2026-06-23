@@ -30,4 +30,5 @@ keyring = { version = "3", features = ["sync-secret-service", "windows-native", 
 dirs = "6"
 russh-sftp = "2.3.0"
 tauri-plugin-dialog = "2.7.1"
+tauri-plugin-drag = "2"
 

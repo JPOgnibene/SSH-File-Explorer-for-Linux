@@ -12,6 +12,9 @@ import { css } from "@codemirror/lang-css";
 import { xml } from "@codemirror/lang-xml";
 import { markdown } from "@codemirror/lang-markdown";
 import { save, open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import "./App.css";
 
 interface FileEntry {
@@ -38,6 +41,14 @@ interface SshKeyInfo {
   name: string;
   key_type: string;
   encrypted: boolean;
+}
+
+interface Transfer {
+  id: string;
+  type: 'upload' | 'download';
+  fileName: string;
+  bytesTransferred: number;
+  totalBytes: number;
 }
 
 function formatSize(bytes: number): string {
@@ -125,6 +136,9 @@ function App() {
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchPrefixRef = useRef("");
 
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
+  const [dragOverWindow, setDragOverWindow] = useState(false);
+
   const isPermissionError = (err: unknown): boolean => {
     const msg = String(err).toLowerCase();
     return msg.includes("permission denied") || msg.includes("operation not permitted");
@@ -174,6 +188,66 @@ function App() {
     }, 20000);
     return () => clearInterval(interval);
   }, [connected, currentPath]);
+
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ id: string; transfer_type: string; file_name: string; bytes_transferred: number; total_bytes: number }>("transfer-progress", (event) => {
+      if (cancelled) return;
+      const p = event.payload;
+      setTransfers(prev => {
+        const idx = prev.findIndex(t => t.id === p.id);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes };
+          return updated;
+        }
+        return [...prev, { id: p.id, type: p.transfer_type as 'upload' | 'download', fileName: p.file_name, bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes }];
+      });
+    }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [connected]);
+
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow().onDragDropEvent((event) => {
+      if (cancelled) return;
+      const { type } = event.payload;
+      if (type === 'enter' || type === 'over') {
+        setDragOverWindow(true);
+      } else if (type === 'leave') {
+        setDragOverWindow(false);
+      } else if (type === 'drop') {
+        setDragOverWindow(false);
+        const paths: string[] = (event.payload as { paths?: string[] }).paths || [];
+        if (paths.length > 0) {
+          (async () => {
+            for (const localPath of paths) {
+              const fileName = localPath.replace(/\\/g, "/").split("/").pop() || "file";
+              const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
+              const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
+              try {
+                await invoke("upload_file", { transferId, localPath, remotePath });
+              } catch (e) {
+                setError(String(e));
+              } finally {
+                setTransfers(prev => prev.filter(t => t.id !== transferId));
+              }
+            }
+            const entries: FileEntry[] = await invoke("list_directory", { path: currentPath });
+            entries.sort((a, b) => { if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1; return a.name.localeCompare(b.name); });
+            setFiles(entries);
+          })();
+        }
+      }
+    }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [connected, currentPath]);
+
 
   useEffect(() => {
     if (!editingFile || !editorRef.current) return;
@@ -572,25 +646,57 @@ function App() {
     }
   };
 
-  const handleDownload = async (file: FileEntry) => {
-    const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+  const handleDownload = async (file: FileEntry, fromPath?: string) => {
+    const dir = fromPath || currentPath;
+    const remotePath = dir === "/" ? `/${file.name}` : `${dir}/${file.name}`;
     try {
       const localPath = await save({ defaultPath: file.name });
       if (!localPath) return;
-      await invoke("download_file", { remotePath, localPath });
+      const transferId = `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
+      try {
+        await invoke("download_file", { transferId, remotePath, localPath });
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
+      }
     } catch (e) {
       setError(String(e));
     }
   };
 
+  const handleDragOut = async (file: FileEntry) => {
+    const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+    const transferId = `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
+    try {
+      const result: { file_path: string; icon_path: string } = await invoke("download_to_temp", { transferId, remotePath });
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+      await startDrag({ item: [result.file_path], icon: result.icon_path });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+    }
+  };
+
   const handleUpload = async () => {
     try {
-      const selected = await open({ multiple: false, directory: false });
+      const selected = await open({ multiple: true, directory: false });
       if (!selected) return;
-      const localPath = String(selected);
-      const fileName = localPath.replace(/\\/g, "/").split("/").pop() || "uploaded_file";
-      const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
-      await invoke("upload_file", { localPath, remotePath });
+      const paths = Array.isArray(selected) ? selected.map(String) : [String(selected)];
+      for (const localPath of paths) {
+        const fileName = localPath.replace(/\\/g, "/").split("/").pop() || "uploaded_file";
+        const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
+        const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
+        try {
+          await invoke("upload_file", { transferId, localPath, remotePath });
+        } catch (e) {
+          setError(String(e));
+        } finally {
+          setTransfers(prev => prev.filter(t => t.id !== transferId));
+        }
+      }
       await listFiles(currentPath);
     } catch (e) {
       setError(String(e));
@@ -1159,6 +1265,20 @@ function App() {
                           <div
                             onClick={(e) => {
                               e.stopPropagation();
+                              handleDragOut(file);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-grab"
+                            title={`Drag ${file.name} to a folder`}
+                          >
+                            <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                            </svg>
+                          </div>
+                        )}
+                        {!file.is_dir && (
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
                               handleDownload(file);
                             }}
                             className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
@@ -1235,11 +1355,52 @@ function App() {
         )}
       </div>
 
+      {/* Transfer progress bars */}
+      {transfers.length > 0 && (
+        <div className="border-t border-zinc-800 bg-zinc-900/40">
+          {transfers.map(transfer => {
+            const pct = transfer.totalBytes > 0 ? Math.round(transfer.bytesTransferred / transfer.totalBytes * 100) : 0;
+            return (
+              <div key={transfer.id} className="flex items-center gap-3 px-4 py-1.5">
+                <svg className={`w-3.5 h-3.5 shrink-0 ${transfer.type === 'upload' ? 'text-emerald-400' : 'text-blue-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  {transfer.type === 'upload' ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  )}
+                </svg>
+                <span className="text-xs text-zinc-300 truncate w-36">{transfer.fileName}</span>
+                <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-150 ${transfer.type === 'upload' ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className="text-xs text-zinc-500 w-10 text-right tabular-nums">{pct}%</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Status bar */}
       <div className="px-4 py-2 bg-zinc-900/30 border-t border-zinc-800 text-xs text-zinc-500 flex items-center justify-between">
         <span>{files.length} items</span>
         <span>{editingFile ? editingFile : currentPath}</span>
       </div>
+
+      {/* Drag-over overlay */}
+      {dragOverWindow && (
+        <div className="fixed inset-0 bg-emerald-500/5 border-2 border-dashed border-emerald-500/40 flex items-center justify-center z-40 pointer-events-none">
+          <div className="text-center bg-zinc-900/90 px-8 py-6 rounded-2xl border border-emerald-500/30">
+            <svg className="w-10 h-10 text-emerald-400 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            <p className="text-emerald-400 font-medium">Drop files to upload</p>
+            <p className="text-emerald-400/50 text-xs mt-1">Uploading to {currentPath}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

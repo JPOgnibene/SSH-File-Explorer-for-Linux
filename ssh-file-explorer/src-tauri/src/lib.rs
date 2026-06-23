@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use russh::*;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 struct SshState {
     session: Option<russh::client::Handle<ClientHandler>>,
@@ -52,6 +52,15 @@ struct FileEntry {
     size: u64,
     modified: String,
     permissions: String,
+}
+
+#[derive(Clone, Serialize)]
+struct TransferProgress {
+    id: String,
+    transfer_type: String,
+    file_name: String,
+    bytes_transferred: u64,
+    total_bytes: u64,
 }
 
 type SshSession = Arc<Mutex<SshState>>;
@@ -636,24 +645,157 @@ async fn search_files(query: String, search_path: String, state: State<'_, SshSe
 }
 
 #[tauri::command]
-async fn download_file(remote_path: String, local_path: String, state: State<'_, SshSession>) -> Result<(), String> {
-    let s = state.lock().await;
-    let sftp = s.sftp.as_ref().ok_or("SFTP not connected")?;
-    let data = sftp.read(&remote_path).await.map_err(|e| format!("Download failed: {}", e))?;
-    std::fs::write(&local_path, &data).map_err(|e| format!("Failed to save file: {}", e))?;
+async fn download_file(app: AppHandle, transfer_id: String, remote_path: String, local_path: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let file_name = remote_path.rsplit('/').next().unwrap_or(&remote_path).to_string();
+
+    let (total_bytes, sftp) = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+
+        let total_bytes: u64 = {
+            let cmd = format!("stat -c '%s' {}", shell_escape(&remote_path));
+            exec_ssh(session, &cmd).await.ok()
+                .and_then(|o| o.trim().parse().ok())
+                .unwrap_or(0)
+        };
+
+        let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+        channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
+        let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?;
+
+        (total_bytes, sftp)
+    };
+
+    let mut remote_file = sftp.open(&remote_path).await.map_err(|e| format!("Failed to open remote file: {}", e))?;
+    let mut local_file = tokio::fs::File::create(&local_path).await.map_err(|e| format!("Failed to create local file: {}", e))?;
+
+    let mut bytes_transferred = 0u64;
+    let mut buf = vec![0u8; 65536];
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    loop {
+        let n = remote_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
+        if n == 0 { break; }
+        local_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
+        bytes_transferred += n as u64;
+        let _ = app.emit("transfer-progress", TransferProgress {
+            id: transfer_id.clone(),
+            transfer_type: "download".to_string(),
+            file_name: file_name.clone(),
+            bytes_transferred,
+            total_bytes,
+        });
+    }
+
     Ok(())
 }
 
 #[tauri::command]
-async fn upload_file(local_path: String, remote_path: String, state: State<'_, SshSession>) -> Result<(), String> {
-    let data = std::fs::read(&local_path).map_err(|e| format!("Failed to read local file '{}': {}", local_path, e))?;
-    let s = state.lock().await;
-    let sftp = s.sftp.as_ref().ok_or("SFTP not connected")?;
-    use tokio::io::AsyncWriteExt;
-    let mut file = sftp.create(&remote_path).await.map_err(|e| format!("Failed to create remote file: {}", e))?;
-    file.write_all(&data).await.map_err(|e| format!("Upload write failed: {}", e))?;
-    file.shutdown().await.map_err(|e| format!("Upload close failed: {}", e))?;
+async fn upload_file(app: AppHandle, transfer_id: String, local_path: String, remote_path: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let file_name = local_path.replace('\\', "/");
+    let file_name = file_name.rsplit('/').next().unwrap_or(&local_path).to_string();
+
+    let total_bytes = tokio::fs::metadata(&local_path).await
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let sftp = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+        channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
+        russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?
+    };
+
+    let mut local_file = tokio::fs::File::open(&local_path).await.map_err(|e| format!("Failed to open local file: {}", e))?;
+    let mut remote_file = sftp.create(&remote_path).await.map_err(|e| format!("Failed to create remote file: {}", e))?;
+
+    let mut bytes_transferred = 0u64;
+    let mut buf = vec![0u8; 65536];
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    loop {
+        let n = local_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
+        if n == 0 { break; }
+        remote_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
+        bytes_transferred += n as u64;
+        let _ = app.emit("transfer-progress", TransferProgress {
+            id: transfer_id.clone(),
+            transfer_type: "upload".to_string(),
+            file_name: file_name.clone(),
+            bytes_transferred,
+            total_bytes,
+        });
+    }
+
+    remote_file.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+
     Ok(())
+}
+
+#[derive(Serialize)]
+struct DownloadToTempResult {
+    file_path: String,
+    icon_path: String,
+}
+
+#[tauri::command]
+async fn download_to_temp(app: AppHandle, transfer_id: String, remote_path: String, state: State<'_, SshSession>) -> Result<DownloadToTempResult, String> {
+    let file_name = remote_path.rsplit('/').next().unwrap_or(&remote_path).to_string();
+    let temp_dir = std::env::temp_dir().join("ssh-file-explorer");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let local_path = temp_dir.join(&file_name);
+    let local_path_str = local_path.to_string_lossy().to_string();
+
+    let icon_path = temp_dir.join("drag-icon.png");
+    if !icon_path.exists() {
+        std::fs::write(&icon_path, include_bytes!("../icons/32x32.png"))
+            .map_err(|e| format!("Failed to write icon: {}", e))?;
+    }
+    let icon_path_str = icon_path.to_string_lossy().to_string();
+
+    let (total_bytes, sftp) = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let total_bytes: u64 = {
+            let cmd = format!("stat -c '%s' {}", shell_escape(&remote_path));
+            exec_ssh(session, &cmd).await.ok()
+                .and_then(|o| o.trim().parse().ok())
+                .unwrap_or(0)
+        };
+        let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+        channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
+        let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?;
+        (total_bytes, sftp)
+    };
+
+    let mut remote_file = sftp.open(&remote_path).await.map_err(|e| format!("Failed to open remote file: {}", e))?;
+    let mut local_file = tokio::fs::File::create(&local_path).await.map_err(|e| format!("Failed to create local file: {}", e))?;
+    let mut bytes_transferred = 0u64;
+    let mut buf = vec![0u8; 65536];
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    loop {
+        let n = remote_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
+        if n == 0 { break; }
+        local_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
+        bytes_transferred += n as u64;
+        let _ = app.emit("transfer-progress", TransferProgress {
+            id: transfer_id.clone(),
+            transfer_type: "download".to_string(),
+            file_name: file_name.clone(),
+            bytes_transferred,
+            total_bytes,
+        });
+    }
+
+    Ok(DownloadToTempResult {
+        file_path: local_path_str,
+        icon_path: icon_path_str,
+    })
 }
 
 fn shell_escape(s: &str) -> String {
@@ -710,6 +852,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_drag::init())
         .manage(Arc::new(Mutex::new(SshState { session: None, sftp: None })) as SshSession)
         .invoke_handler(tauri::generate_handler![
             discover_ssh_keys,
@@ -730,6 +873,7 @@ pub fn run() {
             sudo_delete_file,
             search_files,
             download_file,
+            download_to_temp,
             upload_file,
             get_saved_connections,
             save_connection,
