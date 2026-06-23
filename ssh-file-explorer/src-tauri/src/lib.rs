@@ -4,12 +4,15 @@ use russh::*;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-struct SshState {
-    session: Option<russh::client::Handle<ClientHandler>>,
-    sftp: Option<russh_sftp::client::SftpSession>,
+#[cfg(windows)]
+mod virtual_drag;
+
+pub(crate) struct SshState {
+    pub(crate) session: Option<russh::client::Handle<ClientHandler>>,
+    pub(crate) sftp: Option<russh_sftp::client::SftpSession>,
 }
 
-struct ClientHandler;
+pub(crate) struct ClientHandler;
 
 impl russh::client::Handler for ClientHandler {
     type Error = russh::Error;
@@ -63,7 +66,7 @@ struct TransferProgress {
     total_bytes: u64,
 }
 
-type SshSession = Arc<Mutex<SshState>>;
+pub(crate) type SshSession = Arc<Mutex<SshState>>;
 
 fn connections_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app
@@ -735,67 +738,41 @@ async fn upload_file(app: AppHandle, transfer_id: String, local_path: String, re
     Ok(())
 }
 
-#[derive(Serialize)]
-struct DownloadToTempResult {
-    file_path: String,
-    icon_path: String,
-}
+#[cfg(windows)]
+struct MainThreadId(u32);
 
+#[cfg(windows)]
 #[tauri::command]
-async fn download_to_temp(app: AppHandle, transfer_id: String, remote_path: String, state: State<'_, SshSession>) -> Result<DownloadToTempResult, String> {
-    let file_name = remote_path.rsplit('/').next().unwrap_or(&remote_path).to_string();
-    let temp_dir = std::env::temp_dir().join("ssh-file-explorer");
-    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
-    let local_path = temp_dir.join(&file_name);
-    let local_path_str = local_path.to_string_lossy().to_string();
+async fn start_virtual_drag(
+    app: AppHandle,
+    transfer_id: String,
+    remote_path: String,
+    file_name: String,
+    file_size: u64,
+    state: State<'_, SshSession>,
+    main_tid: State<'_, MainThreadId>,
+) -> Result<(), String> {
+    let rt_handle = tokio::runtime::Handle::current();
+    let ssh_state = state.inner().clone();
+    let main_thread_id = main_tid.0;
 
-    let icon_path = temp_dir.join("drag-icon.png");
-    if !icon_path.exists() {
-        std::fs::write(&icon_path, include_bytes!("../icons/32x32.png"))
-            .map_err(|e| format!("Failed to write icon: {}", e))?;
-    }
-    let icon_path_str = icon_path.to_string_lossy().to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
 
-    let (total_bytes, sftp) = {
-        let s = state.lock().await;
-        let session = s.session.as_ref().ok_or("Not connected")?;
-        let total_bytes: u64 = {
-            let cmd = format!("stat -c '%s' {}", shell_escape(&remote_path));
-            exec_ssh(session, &cmd).await.ok()
-                .and_then(|o| o.trim().parse().ok())
-                .unwrap_or(0)
-        };
-        let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
-        channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
-        let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?;
-        (total_bytes, sftp)
-    };
+    std::thread::spawn(move || {
+        let result = virtual_drag::start_drag(
+            rt_handle,
+            ssh_state,
+            remote_path,
+            file_name,
+            file_size,
+            main_thread_id,
+            app,
+            transfer_id,
+        );
+        let _ = tx.send(result);
+    });
 
-    let mut remote_file = sftp.open(&remote_path).await.map_err(|e| format!("Failed to open remote file: {}", e))?;
-    let mut local_file = tokio::fs::File::create(&local_path).await.map_err(|e| format!("Failed to create local file: {}", e))?;
-    let mut bytes_transferred = 0u64;
-    let mut buf = vec![0u8; 65536];
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    loop {
-        let n = remote_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
-        if n == 0 { break; }
-        local_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
-        bytes_transferred += n as u64;
-        let _ = app.emit("transfer-progress", TransferProgress {
-            id: transfer_id.clone(),
-            transfer_type: "download".to_string(),
-            file_name: file_name.clone(),
-            bytes_transferred,
-            total_bytes,
-        });
-    }
-
-    Ok(DownloadToTempResult {
-        file_path: local_path_str,
-        icon_path: icon_path_str,
-    })
+    rx.await.map_err(|_| "Drag thread error".to_string())?
 }
 
 fn shell_escape(s: &str) -> String {
@@ -849,11 +826,21 @@ fn format_permissions(mode: &str, is_dir: bool) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_drag::init())
-        .manage(Arc::new(Mutex::new(SshState { session: None, sftp: None })) as SshSession)
+        .manage(Arc::new(Mutex::new(SshState { session: None, sftp: None })) as SshSession);
+
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn GetCurrentThreadId() -> u32;
+        }
+        let tid = unsafe { GetCurrentThreadId() };
+        builder = builder.manage(MainThreadId(tid));
+    }
+
+    builder
         .invoke_handler(tauri::generate_handler![
             discover_ssh_keys,
             ssh_connect,
@@ -873,7 +860,7 @@ pub fn run() {
             sudo_delete_file,
             search_files,
             download_file,
-            download_to_temp,
+            start_virtual_drag,
             upload_file,
             get_saved_connections,
             save_connection,

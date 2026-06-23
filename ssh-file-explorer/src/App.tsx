@@ -14,7 +14,6 @@ import { markdown } from "@codemirror/lang-markdown";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import "./App.css";
 
 interface FileEntry {
@@ -666,12 +665,15 @@ function App() {
 
   const handleDragOut = async (file: FileEntry) => {
     const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
-    const transferId = `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
+    const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: file.size }]);
     try {
-      const result: { file_path: string; icon_path: string } = await invoke("download_to_temp", { transferId, remotePath });
-      setTransfers(prev => prev.filter(t => t.id !== transferId));
-      await startDrag({ item: [result.file_path], icon: result.icon_path });
+      await invoke("start_virtual_drag", {
+        transferId,
+        remotePath,
+        fileName: file.name,
+        fileSize: file.size,
+      });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1263,8 +1265,9 @@ function App() {
                       <div className="flex items-center gap-1">
                         {!file.is_dir && (
                           <div
-                            onClick={(e) => {
+                            onMouseDown={(e) => {
                               e.stopPropagation();
+                              e.preventDefault();
                               handleDragOut(file);
                             }}
                             className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-grab"
