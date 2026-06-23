@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter};
 use tokio::runtime::Handle as TokioHandle;
@@ -18,7 +18,17 @@ use crate::{SshState, TransferProgress};
 type SshSession = Arc<Mutex<SshState>>;
 
 const FD_FILESIZE: u32 = 0x40;
+const FD_ATTRIBUTES: u32 = 0x04;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const STGTY_STREAM: u32 = 2;
+
+pub struct VirtualFileEntry {
+    pub relative_path: String,
+    pub remote_path: String,
+    pub is_dir: bool,
+    pub file_size: u64,
+}
 
 #[repr(C)]
 struct FileDescriptorW {
@@ -80,7 +90,9 @@ impl SftpStream {
         file_size: u64,
         app_handle: AppHandle,
         transfer_id: String,
-        file_name: String,
+        display_name: String,
+        total_transfer_size: u64,
+        shared_bytes: Arc<AtomicU64>,
     ) -> Self {
         let buf = Arc::new((
             StdMutex::new(StreamBuffer {
@@ -117,7 +129,6 @@ impl SftpStream {
 
                 use tokio::io::AsyncReadExt;
                 let mut chunk = vec![0u8; 65536];
-                let mut bytes_transferred = 0u64;
                 loop {
                     let n = file
                         .read(&mut chunk)
@@ -126,14 +137,14 @@ impl SftpStream {
                     if n == 0 {
                         break;
                     }
-                    bytes_transferred += n as u64;
 
+                    let total = shared_bytes.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
                     let _ = app_handle.emit("transfer-progress", TransferProgress {
                         id: transfer_id.clone(),
                         transfer_type: "download".to_string(),
-                        file_name: file_name.clone(),
-                        bytes_transferred,
-                        total_bytes: file_size,
+                        file_name: display_name.clone(),
+                        bytes_transferred: total,
+                        total_bytes: total_transfer_size,
                     });
 
                     let (lock, cvar) = &*buf_clone;
@@ -141,7 +152,6 @@ impl SftpStream {
                     state.data.extend(&chunk[..n]);
                     cvar.notify_all();
 
-                    // Backpressure: wait if buffer exceeds 4MB
                     while state.data.len() > 4 * 1024 * 1024 && !state.done {
                         state = cvar.wait(state).unwrap();
                     }
@@ -172,14 +182,12 @@ impl ISequentialStream_Impl for SftpStream {
         let (lock, cvar) = &*self.buf;
         let mut state = lock.lock().unwrap();
 
-        // Wait for data or completion
         while state.data.is_empty() && !state.done {
             state = cvar.wait(state).unwrap();
         }
 
-        if let Some(ref e) = state.error {
+        if let Some(ref _e) = state.error {
             if state.data.is_empty() {
-                let _ = e; // error consumed
                 return E_FAIL;
             }
         }
@@ -190,7 +198,6 @@ impl ISequentialStream_Impl for SftpStream {
             for (i, byte) in state.data.drain(..available).enumerate() {
                 dst[i] = byte;
             }
-            // Signal backpressure relief
             cvar.notify_all();
 
             let mut pos = self.position.lock().unwrap();
@@ -281,43 +288,27 @@ impl IStream_Impl for SftpStream {
     }
 }
 
-// --- IDataObject with virtual file descriptors ---
+// --- IDataObject with multi-file virtual descriptors ---
 
 #[implement(IDataObject)]
 struct VirtualFileDataObject {
-    file_name: String,
-    file_size: u64,
-    remote_path: String,
+    entries: Vec<VirtualFileEntry>,
+    total_size: u64,
+    display_name: String,
     cf_descriptor: u16,
     cf_contents: u16,
     rt_handle: TokioHandle,
     ssh_state: SshSession,
     app_handle: AppHandle,
     transfer_id: String,
+    shared_bytes: Arc<AtomicU64>,
 }
 
 impl VirtualFileDataObject {
     fn build_file_descriptor(&self) -> windows::core::Result<STGMEDIUM> {
-        let mut c_file_name = [0u16; 260];
-        let name_wide: Vec<u16> = self.file_name.encode_utf16().collect();
-        let len = name_wide.len().min(259);
-        c_file_name[..len].copy_from_slice(&name_wide[..len]);
-
-        let descriptor = FileDescriptorW {
-            dw_flags: FD_FILESIZE,
-            clsid: GUID::zeroed(),
-            sizel: [0, 0],
-            pointl: [0, 0],
-            dw_file_attributes: 0,
-            ft_creation_time: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
-            ft_last_access_time: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
-            ft_last_write_time: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
-            n_file_size_high: (self.file_size >> 32) as u32,
-            n_file_size_low: self.file_size as u32,
-            c_file_name,
-        };
-
-        let total_size = 4 + std::mem::size_of::<FileDescriptorW>();
+        let count = self.entries.len();
+        let desc_size = std::mem::size_of::<FileDescriptorW>();
+        let total_size = 4 + desc_size * count;
 
         unsafe {
             let hglobal = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total_size)
@@ -327,12 +318,39 @@ impl VirtualFileDataObject {
                 return Err(Error::new(E_OUTOFMEMORY, HSTRING::new()));
             }
 
-            *(ptr as *mut u32) = 1;
-            std::ptr::copy_nonoverlapping(
-                &descriptor as *const FileDescriptorW as *const u8,
-                (ptr as *mut u8).add(4),
-                std::mem::size_of::<FileDescriptorW>(),
-            );
+            *(ptr as *mut u32) = count as u32;
+
+            for (i, entry) in self.entries.iter().enumerate() {
+                let win_path = entry.relative_path.replace('/', "\\");
+                let mut c_file_name = [0u16; 260];
+                let name_wide: Vec<u16> = win_path.encode_utf16().collect();
+                let len = name_wide.len().min(259);
+                c_file_name[..len].copy_from_slice(&name_wide[..len]);
+
+                let descriptor = FileDescriptorW {
+                    dw_flags: FD_FILESIZE | FD_ATTRIBUTES,
+                    clsid: GUID::zeroed(),
+                    sizel: [0, 0],
+                    pointl: [0, 0],
+                    dw_file_attributes: if entry.is_dir {
+                        FILE_ATTRIBUTE_DIRECTORY
+                    } else {
+                        FILE_ATTRIBUTE_NORMAL
+                    },
+                    ft_creation_time: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+                    ft_last_access_time: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+                    ft_last_write_time: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+                    n_file_size_high: (entry.file_size >> 32) as u32,
+                    n_file_size_low: entry.file_size as u32,
+                    c_file_name,
+                };
+
+                std::ptr::copy_nonoverlapping(
+                    &descriptor as *const FileDescriptorW as *const u8,
+                    (ptr as *mut u8).add(4 + desc_size * i),
+                    desc_size,
+                );
+            }
 
             let _ = GlobalUnlock(hglobal);
 
@@ -344,15 +362,18 @@ impl VirtualFileDataObject {
         }
     }
 
-    fn build_file_contents_stream(&self) -> windows::core::Result<STGMEDIUM> {
+    fn build_file_contents_stream(&self, index: usize) -> windows::core::Result<STGMEDIUM> {
+        let entry = &self.entries[index];
         let stream = SftpStream::new(
             self.rt_handle.clone(),
             self.ssh_state.clone(),
-            self.remote_path.clone(),
-            self.file_size,
+            entry.remote_path.clone(),
+            entry.file_size,
             self.app_handle.clone(),
             self.transfer_id.clone(),
-            self.file_name.clone(),
+            self.display_name.clone(),
+            self.total_size,
+            self.shared_bytes.clone(),
         );
         let istream: IStream = stream.into();
 
@@ -372,8 +393,16 @@ impl IDataObject_Impl for VirtualFileDataObject {
         let fmt = unsafe { &*pformatetcin };
         if fmt.cfFormat == self.cf_descriptor {
             self.build_file_descriptor()
-        } else if fmt.cfFormat == self.cf_contents && fmt.lindex == 0 {
-            self.build_file_contents_stream()
+        } else if fmt.cfFormat == self.cf_contents {
+            let idx = fmt.lindex;
+            if idx < 0 || idx as usize >= self.entries.len() {
+                return Err(Error::new(DV_E_FORMATETC, HSTRING::new()));
+            }
+            let entry = &self.entries[idx as usize];
+            if entry.is_dir {
+                return Err(Error::new(DV_E_FORMATETC, HSTRING::new()));
+            }
+            self.build_file_contents_stream(idx as usize)
         } else {
             Err(Error::new(DV_E_FORMATETC, HSTRING::new()))
         }
@@ -389,10 +418,18 @@ impl IDataObject_Impl for VirtualFileDataObject {
 
     fn QueryGetData(&self, pformatetc: *const FORMATETC) -> HRESULT {
         let fmt = unsafe { &*pformatetc };
-        if fmt.cfFormat == self.cf_descriptor
-            || (fmt.cfFormat == self.cf_contents && fmt.lindex == 0)
-        {
+        if fmt.cfFormat == self.cf_descriptor {
             S_OK
+        } else if fmt.cfFormat == self.cf_contents {
+            if fmt.lindex == -1 {
+                return S_OK;
+            }
+            let idx = fmt.lindex as usize;
+            if idx < self.entries.len() && !self.entries[idx].is_dir {
+                S_OK
+            } else {
+                DV_E_FORMATETC
+            }
         } else {
             DV_E_FORMATETC
         }
@@ -433,7 +470,7 @@ impl IDataObject_Impl for VirtualFileDataObject {
                 cfFormat: self.cf_contents,
                 ptd: std::ptr::null_mut(),
                 dwAspect: DVASPECT_CONTENT.0 as u32,
-                lindex: 0,
+                lindex: -1,
                 tymed: TYMED_ISTREAM.0 as u32,
             },
         ];
@@ -484,7 +521,7 @@ impl IEnumFORMATETC_Impl for FormatEnumerator {
         rgelt: *mut FORMATETC,
         pceltfetched: *mut u32,
     ) -> windows::core::Result<()> {
-        let current = self.index.load(std::sync::atomic::Ordering::SeqCst);
+        let current = self.index.load(Ordering::SeqCst);
         let mut fetched = 0u32;
 
         for i in 0..celt as usize {
@@ -496,8 +533,7 @@ impl IEnumFORMATETC_Impl for FormatEnumerator {
             fetched += 1;
         }
 
-        self.index
-            .store(current + fetched as usize, std::sync::atomic::Ordering::SeqCst);
+        self.index.store(current + fetched as usize, Ordering::SeqCst);
 
         if !pceltfetched.is_null() {
             unsafe { *pceltfetched = fetched };
@@ -511,23 +547,23 @@ impl IEnumFORMATETC_Impl for FormatEnumerator {
     }
 
     fn Skip(&self, celt: u32) -> windows::core::Result<()> {
-        let current = self.index.load(std::sync::atomic::Ordering::SeqCst);
+        let current = self.index.load(Ordering::SeqCst);
         self.index.store(
             (current + celt as usize).min(self.formats.len()),
-            std::sync::atomic::Ordering::SeqCst,
+            Ordering::SeqCst,
         );
         Ok(())
     }
 
     fn Reset(&self) -> windows::core::Result<()> {
-        self.index.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.index.store(0, Ordering::SeqCst);
         Ok(())
     }
 
     fn Clone(&self) -> windows::core::Result<IEnumFORMATETC> {
         let cloned = FormatEnumerator {
             formats: self.formats.clone(),
-            index: AtomicUsize::new(self.index.load(std::sync::atomic::Ordering::SeqCst)),
+            index: AtomicUsize::new(self.index.load(Ordering::SeqCst)),
         };
         Ok(cloned.into())
     }
@@ -538,9 +574,9 @@ impl IEnumFORMATETC_Impl for FormatEnumerator {
 pub fn start_drag(
     rt_handle: TokioHandle,
     ssh_state: SshSession,
-    remote_path: String,
-    file_name: String,
-    file_size: u64,
+    entries: Vec<VirtualFileEntry>,
+    total_size: u64,
+    display_name: String,
     main_thread_id: u32,
     app_handle: AppHandle,
     transfer_id: String,
@@ -566,15 +602,16 @@ pub fn start_drag(
         unsafe { RegisterClipboardFormatW(w!("FileContents")) as u16 };
 
     let data_object: IDataObject = VirtualFileDataObject {
-        file_name,
-        file_size,
-        remote_path,
+        entries,
+        total_size,
+        display_name,
         cf_descriptor,
         cf_contents,
         rt_handle,
         ssh_state,
         app_handle,
         transfer_id,
+        shared_bytes: Arc::new(AtomicU64::new(0)),
     }
     .into();
 

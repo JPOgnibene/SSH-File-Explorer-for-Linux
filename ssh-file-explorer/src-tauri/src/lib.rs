@@ -749,6 +749,7 @@ async fn start_virtual_drag(
     remote_path: String,
     file_name: String,
     file_size: u64,
+    is_dir: bool,
     state: State<'_, SshSession>,
     main_tid: State<'_, MainThreadId>,
 ) -> Result<(), String> {
@@ -756,15 +757,81 @@ async fn start_virtual_drag(
     let ssh_state = state.inner().clone();
     let main_thread_id = main_tid.0;
 
+    let (entries, total_size) = if is_dir {
+        let output = {
+            let s = state.lock().await;
+            let session = s.session.as_ref().ok_or("Not connected")?;
+            let cmd = format!(
+                "find {} -printf '%y|%s|%P\\n' 2>/dev/null",
+                shell_escape(&remote_path)
+            );
+            exec_ssh(session, &cmd).await?
+        };
+
+        let mut entries = Vec::new();
+        let mut total = 0u64;
+
+        for line in output.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            if parts.len() < 3 { continue; }
+
+            let ftype = parts[0];
+            let size: u64 = parts[1].parse().unwrap_or(0);
+            let rel = parts[2];
+
+            let is_entry_dir = ftype == "d";
+            let relative = if rel.is_empty() {
+                file_name.clone()
+            } else {
+                format!("{}/{}", file_name, rel)
+            };
+            let full_remote = if rel.is_empty() {
+                remote_path.clone()
+            } else {
+                format!("{}/{}", remote_path, rel)
+            };
+
+            if !is_entry_dir {
+                total += size;
+            }
+
+            entries.push(virtual_drag::VirtualFileEntry {
+                relative_path: relative,
+                remote_path: full_remote,
+                is_dir: is_entry_dir,
+                file_size: if is_entry_dir { 0 } else { size },
+            });
+        }
+
+        if entries.is_empty() {
+            return Err("Directory is empty or not accessible".to_string());
+        }
+
+        (entries, total)
+    } else {
+        (
+            vec![virtual_drag::VirtualFileEntry {
+                relative_path: file_name.clone(),
+                remote_path: remote_path.clone(),
+                is_dir: false,
+                file_size,
+            }],
+            file_size,
+        )
+    };
+
+    let display_name = file_name.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     std::thread::spawn(move || {
         let result = virtual_drag::start_drag(
             rt_handle,
             ssh_state,
-            remote_path,
-            file_name,
-            file_size,
+            entries,
+            total_size,
+            display_name,
             main_thread_id,
             app,
             transfer_id,
@@ -773,6 +840,139 @@ async fn start_virtual_drag(
     });
 
     rx.await.map_err(|_| "Drag thread error".to_string())?
+}
+
+#[tauri::command]
+async fn is_local_directory(path: String) -> Result<bool, String> {
+    tokio::fs::metadata(&path)
+        .await
+        .map(|m| m.is_dir())
+        .map_err(|e| format!("Failed to check path: {}", e))
+}
+
+#[tauri::command]
+async fn upload_directory(
+    app: AppHandle,
+    transfer_id: String,
+    local_path: String,
+    remote_path: String,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
+    let local_base = std::path::Path::new(&local_path);
+
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut dirs: Vec<String> = vec![remote_path.clone()];
+    let mut total_bytes = 0u64;
+
+    let mut stack = vec![local_base.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut rd = tokio::fs::read_dir(&dir)
+            .await
+            .map_err(|e| format!("Read dir error: {}", e))?;
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let meta = entry
+                .metadata()
+                .await
+                .map_err(|e| format!("Metadata error: {}", e))?;
+            let rel = entry
+                .path()
+                .strip_prefix(local_base)
+                .unwrap()
+                .to_path_buf();
+            let remote_entry = format!(
+                "{}/{}",
+                remote_path,
+                rel.to_string_lossy().replace('\\', "/")
+            );
+
+            if meta.is_dir() {
+                dirs.push(remote_entry);
+                stack.push(entry.path());
+            } else {
+                total_bytes += meta.len();
+                files.push((entry.path(), remote_entry));
+            }
+        }
+    }
+
+    {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let mkdir_args = dirs
+            .iter()
+            .map(|d| shell_escape(d))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cmd = format!("mkdir -p {} 2>&1", mkdir_args);
+        exec_ssh(session, &cmd).await?;
+    }
+
+    let sftp = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let channel = session
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("Channel error: {}", e))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| format!("SFTP subsystem error: {}", e))?;
+        russh_sftp::client::SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|e| format!("SFTP init error: {}", e))?
+    };
+
+    let dir_name = local_base
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let mut bytes_transferred = 0u64;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for (file_path, remote_file_path) in &files {
+        let mut local_file = tokio::fs::File::open(file_path)
+            .await
+            .map_err(|e| format!("Open error: {}", e))?;
+        let mut remote_file = sftp
+            .create(remote_file_path)
+            .await
+            .map_err(|e| format!("Create remote file error: {}", e))?;
+
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = local_file
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            remote_file
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| format!("Write error: {}", e))?;
+            bytes_transferred += n as u64;
+            let _ = app.emit(
+                "transfer-progress",
+                TransferProgress {
+                    id: transfer_id.clone(),
+                    transfer_type: "upload".to_string(),
+                    file_name: dir_name.clone(),
+                    bytes_transferred,
+                    total_bytes,
+                },
+            );
+        }
+        remote_file
+            .shutdown()
+            .await
+            .map_err(|e| format!("Close error: {}", e))?;
+    }
+
+    Ok(())
 }
 
 fn shell_escape(s: &str) -> String {
@@ -861,7 +1061,9 @@ pub fn run() {
             search_files,
             download_file,
             start_virtual_drag,
+            is_local_directory,
             upload_file,
+            upload_directory,
             get_saved_connections,
             save_connection,
             get_connection_password,

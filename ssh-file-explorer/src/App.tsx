@@ -228,9 +228,14 @@ function App() {
               const fileName = localPath.replace(/\\/g, "/").split("/").pop() || "file";
               const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
               const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              const isDir: boolean = await invoke("is_local_directory", { path: localPath });
               setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
               try {
-                await invoke("upload_file", { transferId, localPath, remotePath });
+                if (isDir) {
+                  await invoke("upload_directory", { transferId, localPath, remotePath });
+                } else {
+                  await invoke("upload_file", { transferId, localPath, remotePath });
+                }
               } catch (e) {
                 setError(String(e));
               } finally {
@@ -673,6 +678,7 @@ function App() {
         remotePath,
         fileName: file.name,
         fileSize: file.size,
+        isDir: file.is_dir,
       });
     } catch (e) {
       setError(String(e));
@@ -1263,21 +1269,19 @@ function App() {
                     )}
                     <td className="py-2 px-2">
                       <div className="flex items-center gap-1">
-                        {!file.is_dir && (
-                          <div
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              e.preventDefault();
-                              handleDragOut(file);
-                            }}
-                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-grab"
-                            title={`Drag ${file.name} to a folder`}
-                          >
-                            <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
-                            </svg>
-                          </div>
-                        )}
+                        <div
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            handleDragOut(file);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-grab"
+                          title={`Drag ${file.name} to a folder`}
+                        >
+                          <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                          </svg>
+                        </div>
                         {!file.is_dir && (
                           <div
                             onClick={(e) => {
