@@ -970,6 +970,190 @@ async fn upload_directory(
     Ok(())
 }
 
+#[tauri::command]
+async fn sudo_upload_file(
+    app: AppHandle,
+    transfer_id: String,
+    local_path: String,
+    remote_path: String,
+    sudo_password: String,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
+    let file_name = local_path.replace('\\', "/");
+    let file_name = file_name.rsplit('/').next().unwrap_or(&local_path).to_string();
+
+    let total_bytes = tokio::fs::metadata(&local_path).await
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let temp_path = format!("/tmp/.ssh-explorer-{}", transfer_id);
+
+    let sftp = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+        channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
+        russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?
+    };
+
+    let mut local_file = tokio::fs::File::open(&local_path).await.map_err(|e| format!("Failed to open local file: {}", e))?;
+    let mut remote_file = sftp.create(&temp_path).await.map_err(|e| format!("Failed to create temp file: {}", e))?;
+
+    let mut bytes_transferred = 0u64;
+    let mut buf = vec![0u8; 65536];
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    loop {
+        let n = local_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
+        if n == 0 { break; }
+        remote_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
+        bytes_transferred += n as u64;
+        let _ = app.emit("transfer-progress", TransferProgress {
+            id: transfer_id.clone(),
+            transfer_type: "upload".to_string(),
+            file_name: file_name.clone(),
+            bytes_transferred,
+            total_bytes,
+        });
+    }
+
+    remote_file.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+
+    let result = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let parent = match remote_path.rfind('/') {
+            Some(pos) if pos > 0 => &remote_path[..pos],
+            _ => "/",
+        };
+        let cmd = format!(
+            "mkdir -p {} && mv {} {}",
+            shell_escape(parent),
+            shell_escape(&temp_path),
+            shell_escape(&remote_path),
+        );
+        sudo_exec_ssh(session, &sudo_password, &cmd).await
+    };
+
+    if result.is_err() {
+        let s = state.lock().await;
+        if let Some(session) = s.session.as_ref() {
+            let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&temp_path))).await;
+        }
+    }
+
+    result?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn sudo_upload_directory(
+    app: AppHandle,
+    transfer_id: String,
+    local_path: String,
+    remote_path: String,
+    sudo_password: String,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
+    let local_base = std::path::Path::new(&local_path);
+    let temp_base = format!("/tmp/.ssh-explorer-{}", transfer_id);
+
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut target_dirs: Vec<String> = vec![remote_path.clone()];
+    let mut temp_dirs: Vec<String> = vec![temp_base.clone()];
+    let mut total_bytes = 0u64;
+
+    let mut stack = vec![local_base.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut rd = tokio::fs::read_dir(&dir).await
+            .map_err(|e| format!("Read dir error: {}", e))?;
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let meta = entry.metadata().await
+                .map_err(|e| format!("Metadata error: {}", e))?;
+            let rel = entry.path().strip_prefix(local_base).unwrap().to_path_buf();
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let remote_entry = format!("{}/{}", remote_path, rel_str);
+            let temp_entry = format!("{}/{}", temp_base, rel_str);
+
+            if meta.is_dir() {
+                target_dirs.push(remote_entry);
+                temp_dirs.push(temp_entry);
+                stack.push(entry.path());
+            } else {
+                total_bytes += meta.len();
+                files.push((entry.path(), temp_entry));
+            }
+        }
+    }
+
+    // Create temp directory structure (no sudo needed — it's in /tmp)
+    {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let mkdir_args = temp_dirs.iter().map(|d| shell_escape(d)).collect::<Vec<_>>().join(" ");
+        let cmd = format!("mkdir -p {}", mkdir_args);
+        exec_ssh(session, &cmd).await?;
+    }
+
+    // Upload files to temp via SFTP
+    let sftp = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+        channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
+        russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?
+    };
+
+    let dir_name = local_base.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let mut bytes_transferred = 0u64;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for (file_path, temp_file_path) in &files {
+        let mut local_file = tokio::fs::File::open(file_path).await
+            .map_err(|e| format!("Open error: {}", e))?;
+        let mut remote_file = sftp.create(temp_file_path).await
+            .map_err(|e| format!("Create temp file error: {}", e))?;
+
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = local_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 { break; }
+            remote_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
+            bytes_transferred += n as u64;
+            let _ = app.emit("transfer-progress", TransferProgress {
+                id: transfer_id.clone(),
+                transfer_type: "upload".to_string(),
+                file_name: dir_name.clone(),
+                bytes_transferred,
+                total_bytes,
+            });
+        }
+        remote_file.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+    }
+
+    // Create target dirs and move files with sudo
+    let result = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let mkdir_args = target_dirs.iter().map(|d| shell_escape(d)).collect::<Vec<_>>().join(" ");
+        let cmd = format!("mkdir -p {} && cp -rT {} {}", mkdir_args, shell_escape(&temp_base), shell_escape(&remote_path));
+        sudo_exec_ssh(session, &sudo_password, &cmd).await
+    };
+
+    // Clean up temp regardless of success/failure
+    {
+        let s = state.lock().await;
+        if let Some(session) = s.session.as_ref() {
+            let _ = exec_ssh(session, &format!("rm -rf {}", shell_escape(&temp_base))).await;
+        }
+    }
+
+    result?;
+    Ok(())
+}
+
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -1062,6 +1246,8 @@ pub fn run() {
             is_local_directory,
             upload_file,
             upload_directory,
+            sudo_upload_file,
+            sudo_upload_directory,
             get_saved_connections,
             save_connection,
             get_connection_password,

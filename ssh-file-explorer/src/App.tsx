@@ -294,10 +294,22 @@ function App() {
               const isDir: boolean = await invoke("is_local_directory", { path: localPath });
               setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
               try {
-                if (isDir) {
-                  await invoke("upload_directory", { transferId, localPath, remotePath });
-                } else {
-                  await invoke("upload_file", { transferId, localPath, remotePath });
+                try {
+                  if (isDir) {
+                    await invoke("upload_directory", { transferId, localPath, remotePath });
+                  } else {
+                    await invoke("upload_file", { transferId, localPath, remotePath });
+                  }
+                } catch (e) {
+                  if (isPermissionError(e) && sudoPassword) {
+                    if (isDir) {
+                      await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+                    } else {
+                      await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+                    }
+                  } else {
+                    throw e;
+                  }
                 }
               } catch (e) {
                 setError(String(e));
@@ -765,7 +777,15 @@ function App() {
         const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
         try {
-          await invoke("upload_file", { transferId, localPath, remotePath });
+          try {
+            await invoke("upload_file", { transferId, localPath, remotePath });
+          } catch (e) {
+            if (isPermissionError(e) && sudoPassword) {
+              await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+            } else {
+              throw e;
+            }
+          }
         } catch (e) {
           setError(String(e));
         } finally {
