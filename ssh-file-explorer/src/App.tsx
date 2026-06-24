@@ -216,7 +216,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!activeDrag || !progressPort) return;
+    if (!progressPort) return;
     const dragTransfer = transfers.find(t => t.type === 'download' && t.id.startsWith('drag-'));
     if (!dragTransfer) return;
     const SENTINEL = 18446744073709551615;
@@ -226,8 +226,6 @@ function App() {
         const data = await resp.json();
         if (data.total >= SENTINEL) {
           clearInterval(interval);
-          setActiveDrag(null);
-          document.body.style.cursor = '';
           setTransfers(prev => {
             const idx = prev.findIndex(t => t.id === dragTransfer.id);
             if (idx >= 0) {
@@ -257,7 +255,7 @@ function App() {
       } catch {}
     }, 150);
     return () => clearInterval(interval);
-  }, [activeDrag, progressPort]);
+  }, [transfers, progressPort]);
 
   useEffect(() => {
     if (!connected) return;
@@ -749,9 +747,10 @@ function App() {
       });
     } catch (e) {
       setError(String(e));
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+    } finally {
       setActiveDrag(null);
       document.body.style.cursor = '';
-      setTransfers(prev => prev.filter(t => t.id !== transferId));
     }
   };
 
