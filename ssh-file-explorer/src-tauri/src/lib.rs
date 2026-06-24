@@ -695,6 +695,88 @@ async fn download_file(app: AppHandle, transfer_id: String, remote_path: String,
 }
 
 #[tauri::command]
+async fn download_directory(
+    app: AppHandle,
+    transfer_id: String,
+    remote_path: String,
+    local_path: String,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
+    let dir_name = remote_path.rsplit('/').next().unwrap_or(&remote_path).to_string();
+
+    let (file_list, total_bytes) = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let cmd = format!(
+            "find {} -type f -printf '%s|%P\\n' 2>/dev/null",
+            shell_escape(&remote_path)
+        );
+        let output = exec_ssh(session, &cmd).await?;
+
+        let mut files = Vec::new();
+        let mut total = 0u64;
+        for line in output.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let parts: Vec<&str> = line.splitn(2, '|').collect();
+            if parts.len() < 2 { continue; }
+            let size: u64 = parts[0].parse().unwrap_or(0);
+            let rel_path = parts[1].to_string();
+            total += size;
+            files.push(rel_path);
+        }
+        (files, total)
+    };
+
+    tokio::fs::create_dir_all(&local_path).await
+        .map_err(|e| format!("Failed to create local directory: {}", e))?;
+
+    let sftp = {
+        let s = state.lock().await;
+        let session = s.session.as_ref().ok_or("Not connected")?;
+        let channel = session.channel_open_session().await.map_err(|e| format!("Channel error: {}", e))?;
+        channel.request_subsystem(true, "sftp").await.map_err(|e| format!("SFTP subsystem error: {}", e))?;
+        russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP init error: {}", e))?
+    };
+
+    let mut bytes_transferred = 0u64;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for rel_path in &file_list {
+        let remote_file_path = format!("{}/{}", remote_path, rel_path);
+        let local_file_path = std::path::Path::new(&local_path).join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+        if let Some(parent) = local_file_path.parent() {
+            tokio::fs::create_dir_all(parent).await
+                .map_err(|e| format!("Failed to create local directory: {}", e))?;
+        }
+
+        let mut remote_file = sftp.open(&remote_file_path).await
+            .map_err(|e| format!("Failed to open remote file: {}", e))?;
+        let mut local_file = tokio::fs::File::create(&local_file_path).await
+            .map_err(|e| format!("Failed to create local file: {}", e))?;
+
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = remote_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
+            if n == 0 { break; }
+            local_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
+            bytes_transferred += n as u64;
+            let _ = app.emit("transfer-progress", TransferProgress {
+                id: transfer_id.clone(),
+                transfer_type: "download".to_string(),
+                file_name: dir_name.clone(),
+                bytes_transferred,
+                total_bytes,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn upload_file(app: AppHandle, transfer_id: String, local_path: String, remote_path: String, state: State<'_, SshSession>) -> Result<(), String> {
     let file_name = local_path.replace('\\', "/");
     let file_name = file_name.rsplit('/').next().unwrap_or(&local_path).to_string();
@@ -1252,6 +1334,7 @@ pub fn run() {
             sudo_delete_file,
             search_files,
             download_file,
+            download_directory,
             start_virtual_drag,
             get_progress_port,
             is_local_directory,

@@ -729,12 +729,23 @@ function App() {
     const dir = fromPath || currentPath;
     const remotePath = dir === "/" ? `/${file.name}` : `${dir}/${file.name}`;
     try {
-      const localPath = await save({ defaultPath: file.name });
+      let localPath: string | null;
+      if (file.is_dir) {
+        const selected = await open({ multiple: false, directory: true, title: `Save "${file.name}" to...` });
+        if (!selected) return;
+        localPath = `${String(selected)}${String(selected).endsWith("\\") || String(selected).endsWith("/") ? "" : "/"}${file.name}`;
+      } else {
+        localPath = await save({ defaultPath: file.name });
+      }
       if (!localPath) return;
       const transferId = `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
       try {
-        await invoke("download_file", { transferId, remotePath, localPath });
+        if (file.is_dir) {
+          await invoke("download_directory", { transferId, remotePath, localPath });
+        } else {
+          await invoke("download_file", { transferId, remotePath, localPath });
+        }
       } finally {
         setTransfers(prev => prev.filter(t => t.id !== transferId));
       }
@@ -791,6 +802,36 @@ function App() {
         } finally {
           setTransfers(prev => prev.filter(t => t.id !== transferId));
         }
+      }
+      await listFiles(currentPath);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleUploadDirectory = async () => {
+    try {
+      const selected = await open({ multiple: false, directory: true });
+      if (!selected) return;
+      const localPath = String(selected);
+      const dirName = localPath.replace(/\\/g, "/").split("/").pop() || "folder";
+      const remotePath = currentPath === "/" ? `/${dirName}` : `${currentPath}/${dirName}`;
+      const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName: dirName, bytesTransferred: 0, totalBytes: 0 }]);
+      try {
+        try {
+          await invoke("upload_directory", { transferId, localPath, remotePath });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+          } else {
+            throw e;
+          }
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
       }
       await listFiles(currentPath);
     } catch (e) {
@@ -1063,13 +1104,32 @@ function App() {
         >
           + New File/Folder
         </button>
-        <button
-          onClick={handleUpload}
-          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
-          title="Upload file"
-        >
-          Upload
-        </button>
+        <div className="relative">
+          <button
+            onClick={(e) => {
+              const menu = e.currentTarget.nextElementSibling;
+              if (menu) menu.classList.toggle("hidden");
+            }}
+            className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+            title="Upload files or folder"
+          >
+            Upload
+          </button>
+          <div className="hidden absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg z-50 min-w-[120px]">
+            <button
+              onClick={(e) => { e.currentTarget.parentElement!.classList.add("hidden"); handleUpload(); }}
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 rounded-t-md cursor-pointer"
+            >
+              Files
+            </button>
+            <button
+              onClick={(e) => { e.currentTarget.parentElement!.classList.add("hidden"); handleUploadDirectory(); }}
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 rounded-b-md cursor-pointer"
+            >
+              Folder
+            </button>
+          </div>
+        </div>
 
         {!showSaveForm && (
           <button
@@ -1369,20 +1429,18 @@ function App() {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
                           </svg>
                         </div>
-                        {!file.is_dir && (
-                          <div
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDownload(file);
-                            }}
-                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
-                            title={`Download ${file.name}`}
-                          >
-                            <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                            </svg>
-                          </div>
-                        )}
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDownload(file);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
+                          title={`Download ${file.name}`}
+                        >
+                          <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                          </svg>
+                        </div>
                         <div
                           onClick={(e) => {
                             e.stopPropagation();
