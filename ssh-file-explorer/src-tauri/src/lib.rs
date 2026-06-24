@@ -898,8 +898,19 @@ async fn upload_directory(
             .map(|d| shell_escape(d))
             .collect::<Vec<_>>()
             .join(" ");
-        let cmd = format!("mkdir -p {} 2>&1", mkdir_args);
-        exec_ssh(session, &cmd).await?;
+        let cmd = format!("mkdir -p {} 2>&1; echo \"EXIT:$?\"", mkdir_args);
+        let output = exec_ssh(session, &cmd).await?;
+        let mut exit_code = 0;
+        let filtered: String = output.lines().filter(|line| {
+            if let Some(code) = line.strip_prefix("EXIT:") {
+                exit_code = code.trim().parse::<i32>().unwrap_or(1);
+                return false;
+            }
+            true
+        }).collect::<Vec<_>>().join("\n");
+        if exit_code != 0 {
+            return Err(filtered.trim().to_string());
+        }
     }
 
     let sftp = {
