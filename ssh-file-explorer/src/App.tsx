@@ -385,7 +385,16 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const entries: FileEntry[] = await invoke("list_directory", { path });
+      let entries: FileEntry[];
+      try {
+        entries = await invoke("list_directory", { path });
+      } catch (e) {
+        if (isPermissionError(e) && sudoPassword) {
+          entries = await invoke("sudo_list_directory", { path, sudoPassword });
+        } else {
+          throw e;
+        }
+      }
       entries.sort((a, b) => {
         if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
         return a.name.localeCompare(b.name);
@@ -399,7 +408,7 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sudoPassword]);
 
   const doConnect = async (h: string, p: number, u: string, pw: string) => {
     setConnecting(true);

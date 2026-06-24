@@ -466,6 +466,66 @@ async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Ve
         });
     }
 
+    if entries.is_empty() {
+        let check = format!("ls {} 2>&1", shell_escape(&path));
+        let check_output = exec_ssh(session, &check).await.unwrap_or_default();
+        if check_output.contains("Permission denied") {
+            return Err("Permission denied".to_string());
+        }
+    }
+
+    Ok(entries)
+}
+
+#[tauri::command]
+async fn sudo_list_directory(path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<Vec<FileEntry>, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+
+    let cmd = format!(
+        "LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/* 2>/dev/null; LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/.[!.]* 2>/dev/null",
+        shell_escape(&path),
+        shell_escape(&path)
+    );
+
+    let text = sudo_exec_ssh(session, &sudo_password, &cmd).await?;
+    let mut entries = Vec::new();
+
+    for line in text.lines() {
+        let parts: Vec<&str> = line.splitn(5, '|').collect();
+        if parts.len() != 5 {
+            continue;
+        }
+
+        let full_path = parts[0];
+        let name = full_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(full_path)
+            .to_string();
+
+        if name == "." || name == ".." {
+            continue;
+        }
+
+        let is_dir = parts[1] == "directory";
+        let size: u64 = parts[2].parse().unwrap_or(0);
+
+        let timestamp: i64 = parts[3].parse().unwrap_or(0);
+        let modified = format_timestamp(timestamp);
+
+        let mode = parts[4].to_string();
+        let permissions = format_permissions(&mode, is_dir);
+
+        entries.push(FileEntry {
+            name,
+            is_dir,
+            size,
+            modified,
+            permissions,
+        });
+    }
+
     Ok(entries)
 }
 
@@ -1322,6 +1382,7 @@ pub fn run() {
             ssh_disconnect,
             check_writable,
             list_directory,
+            sudo_list_directory,
             read_file,
             write_file,
             create_file,
