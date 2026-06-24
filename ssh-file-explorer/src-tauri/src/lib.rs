@@ -739,9 +739,6 @@ async fn upload_file(app: AppHandle, transfer_id: String, local_path: String, re
 }
 
 #[cfg(windows)]
-struct MainThreadId(u32);
-
-#[cfg(windows)]
 #[tauri::command]
 async fn start_virtual_drag(
     app: AppHandle,
@@ -751,11 +748,9 @@ async fn start_virtual_drag(
     file_size: u64,
     is_dir: bool,
     state: State<'_, SshSession>,
-    main_tid: State<'_, MainThreadId>,
 ) -> Result<(), String> {
     let rt_handle = tokio::runtime::Handle::current();
     let ssh_state = state.inner().clone();
-    let main_thread_id = main_tid.0;
 
     let (entries, total_size) = if is_dir {
         let output = {
@@ -824,20 +819,20 @@ async fn start_virtual_drag(
 
     let display_name = file_name.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let app_for_drag = app.clone();
 
-    std::thread::spawn(move || {
+    app.run_on_main_thread(move || {
         let result = virtual_drag::start_drag(
             rt_handle,
             ssh_state,
             entries,
             total_size,
             display_name,
-            main_thread_id,
-            app,
+            app_for_drag,
             transfer_id,
         );
         let _ = tx.send(result);
-    });
+    }).map_err(|e| format!("Failed to schedule drag on main thread: {}", e))?;
 
     rx.await.map_err(|_| "Drag thread error".to_string())?
 }
@@ -1024,23 +1019,23 @@ fn format_permissions(mode: &str, is_dir: bool) -> String {
     perms
 }
 
+#[tauri::command]
+fn get_progress_port() -> u16 {
+    #[cfg(windows)]
+    { virtual_drag::progress_port() }
+    #[cfg(not(windows))]
+    { 0 }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default()
+    #[cfg(windows)]
+    virtual_drag::start_progress_server();
+
+    tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::new(Mutex::new(SshState { session: None, sftp: None })) as SshSession);
-
-    #[cfg(windows)]
-    {
-        extern "system" {
-            fn GetCurrentThreadId() -> u32;
-        }
-        let tid = unsafe { GetCurrentThreadId() };
-        builder = builder.manage(MainThreadId(tid));
-    }
-
-    builder
+        .manage(Arc::new(Mutex::new(SshState { session: None, sftp: None })) as SshSession)
         .invoke_handler(tauri::generate_handler![
             discover_ssh_keys,
             ssh_connect,
@@ -1061,6 +1056,7 @@ pub fn run() {
             search_files,
             download_file,
             start_virtual_drag,
+            get_progress_port,
             is_local_directory,
             upload_file,
             upload_directory,

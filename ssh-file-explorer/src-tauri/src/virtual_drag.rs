@@ -11,17 +11,96 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::*;
 use windows::Win32::System::Ole::*;
-use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
+use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+
+use serde::Serialize;
 
 use crate::{SshState, TransferProgress};
 
 type SshSession = Arc<Mutex<SshState>>;
+
+#[derive(Clone, Serialize)]
+struct TransferComplete {
+    id: String,
+}
+
+pub static DRAG_PROGRESS_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static DRAG_PROGRESS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static PROGRESS_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+pub fn start_progress_server() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind progress server");
+    let port = listener.local_addr().unwrap().port();
+    PROGRESS_PORT.store(port, Ordering::Relaxed);
+
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        let cors = "\
+            Access-Control-Allow-Origin: *\r\n\
+            Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+            Access-Control-Allow-Headers: *\r\n\
+            Access-Control-Allow-Private-Network: true\r\n\
+            Connection: close\r\n";
+
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+            let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(200)));
+            let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+
+            let is_options = n >= 7 && &buf[..7] == b"OPTIONS";
+            let resp = if is_options {
+                format!("HTTP/1.1 204 No Content\r\n{}\r\n", cors)
+            } else {
+                let bytes = DRAG_PROGRESS_BYTES.load(Ordering::Relaxed);
+                let total = DRAG_PROGRESS_TOTAL.load(Ordering::Relaxed);
+                let body = format!(r#"{{"bytes":{},"total":{}}}"#, bytes, total);
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n{}",
+                    cors, body.len(), body
+                )
+            };
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+}
+
+pub fn progress_port() -> u16 {
+    PROGRESS_PORT.load(Ordering::Relaxed)
+}
 
 const FD_FILESIZE: u32 = 0x40;
 const FD_ATTRIBUTES: u32 = 0x04;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const STGTY_STREAM: u32 = 2;
+
+#[repr(C)]
+struct RawMSG {
+    hwnd: isize,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+    time: u32,
+    pt_x: i32,
+    pt_y: i32,
+}
+
+extern "system" {
+    fn GetMessageW(msg: *mut RawMSG, hwnd: isize, min: u32, max: u32) -> i32;
+    fn TranslateMessage(msg: *const RawMSG) -> i32;
+    fn DispatchMessageW(msg: *const RawMSG) -> isize;
+    fn CoMarshalInterThreadInterfaceInStream(
+        riid: *const GUID,
+        punk: *mut c_void,
+        ppstm: *mut *mut c_void,
+    ) -> HRESULT;
+    fn CoGetInterfaceAndReleaseStream(
+        pstm: *mut c_void,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> HRESULT;
+}
 
 pub struct VirtualFileEntry {
     pub relative_path: String,
@@ -46,16 +125,27 @@ struct FileDescriptorW {
 }
 
 // --- IDropSource ---
+// Runs on the main thread via run_on_main_thread, so grfkeystate is reliable.
+// We still use GetAsyncKeyState as a safety measure since it works on any thread.
 
 #[implement(IDropSource)]
 struct SimpleDropSource;
 
 #[allow(non_snake_case)]
 impl IDropSource_Impl for SimpleDropSource {
-    fn QueryContinueDrag(&self, fescapepressed: BOOL, grfkeystate: MODIFIERKEYS_FLAGS) -> HRESULT {
+    fn QueryContinueDrag(&self, fescapepressed: BOOL, _grfkeystate: MODIFIERKEYS_FLAGS) -> HRESULT {
         if fescapepressed.as_bool() {
-            DRAGDROP_S_CANCEL
-        } else if (grfkeystate & MK_LBUTTON) == MODIFIERKEYS_FLAGS(0) {
+            return DRAGDROP_S_CANCEL;
+        }
+
+        extern "system" {
+            fn GetAsyncKeyState(vKey: i32) -> i16;
+        }
+
+        const VK_LBUTTON: i32 = 0x01;
+        let lbutton_down = unsafe { GetAsyncKeyState(VK_LBUTTON) } < 0;
+
+        if !lbutton_down {
             DRAGDROP_S_DROP
         } else {
             S_OK
@@ -75,11 +165,24 @@ struct StreamBuffer {
     error: Option<String>,
 }
 
+struct DownloadParams {
+    rt_handle: TokioHandle,
+    ssh_state: SshSession,
+    remote_path: String,
+    app_handle: AppHandle,
+    transfer_id: String,
+    display_name: String,
+    total_transfer_size: u64,
+    shared_bytes: Arc<AtomicU64>,
+}
+
 #[implement(IStream)]
 struct SftpStream {
     file_size: u64,
     buf: Arc<(StdMutex<StreamBuffer>, Condvar)>,
     position: StdMutex<u64>,
+    download_started: std::sync::atomic::AtomicBool,
+    params: StdMutex<Option<DownloadParams>>,
 }
 
 impl SftpStream {
@@ -94,20 +197,38 @@ impl SftpStream {
         total_transfer_size: u64,
         shared_bytes: Arc<AtomicU64>,
     ) -> Self {
-        let buf = Arc::new((
-            StdMutex::new(StreamBuffer {
-                data: VecDeque::new(),
-                done: false,
-                error: None,
-            }),
-            Condvar::new(),
-        ));
+        Self {
+            file_size,
+            buf: Arc::new((
+                StdMutex::new(StreamBuffer {
+                    data: VecDeque::new(),
+                    done: false,
+                    error: None,
+                }),
+                Condvar::new(),
+            )),
+            position: StdMutex::new(0),
+            download_started: std::sync::atomic::AtomicBool::new(false),
+            params: StdMutex::new(Some(DownloadParams {
+                rt_handle, ssh_state, remote_path, app_handle,
+                transfer_id, display_name, total_transfer_size, shared_bytes,
+            })),
+        }
+    }
 
-        let buf_clone = buf.clone();
+    fn ensure_download_started(&self) {
+        if self.download_started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(params) = self.params.lock().unwrap().take() else { return };
+        let buf_clone = self.buf.clone();
+
         std::thread::spawn(move || {
-            let result = rt_handle.block_on(async {
+            let app_for_complete = params.app_handle.clone();
+            let id_for_complete = params.transfer_id.clone();
+            let result = params.rt_handle.block_on(async {
                 let sftp = {
-                    let s = ssh_state.lock().await;
+                    let s = params.ssh_state.lock().await;
                     let session = s.session.as_ref().ok_or("Not connected")?;
                     let channel = session
                         .channel_open_session()
@@ -123,7 +244,7 @@ impl SftpStream {
                 };
 
                 let mut file = sftp
-                    .open(&remote_path)
+                    .open(&params.remote_path)
                     .await
                     .map_err(|e| format!("Open error: {}", e))?;
 
@@ -138,13 +259,14 @@ impl SftpStream {
                         break;
                     }
 
-                    let total = shared_bytes.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-                    let _ = app_handle.emit("transfer-progress", TransferProgress {
-                        id: transfer_id.clone(),
+                    let total = params.shared_bytes.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+                    DRAG_PROGRESS_BYTES.store(total, Ordering::Relaxed);
+                    let _ = params.app_handle.emit("transfer-progress", TransferProgress {
+                        id: params.transfer_id.clone(),
                         transfer_type: "download".to_string(),
-                        file_name: display_name.clone(),
+                        file_name: params.display_name.clone(),
                         bytes_transferred: total,
-                        total_bytes: total_transfer_size,
+                        total_bytes: params.total_transfer_size,
                     });
 
                     let (lock, cvar) = &*buf_clone;
@@ -166,19 +288,19 @@ impl SftpStream {
                 state.error = Some(e);
             }
             cvar.notify_all();
-        });
 
-        Self {
-            file_size,
-            buf,
-            position: StdMutex::new(0),
-        }
+            let _ = app_for_complete.emit("transfer-complete", TransferComplete {
+                id: id_for_complete,
+            });
+        });
     }
 }
 
 #[allow(non_snake_case)]
 impl ISequentialStream_Impl for SftpStream {
     fn Read(&self, pv: *mut c_void, cb: u32, pcbread: *mut u32) -> HRESULT {
+        self.ensure_download_started();
+
         let (lock, cvar) = &*self.buf;
         let mut state = lock.lock().unwrap();
 
@@ -186,14 +308,8 @@ impl ISequentialStream_Impl for SftpStream {
             state = cvar.wait(state).unwrap();
         }
 
-        if let Some(ref _e) = state.error {
-            if state.data.is_empty() {
-                return E_FAIL;
-            }
-        }
-
-        let available = state.data.len().min(cb as usize);
-        if available > 0 {
+        if !state.data.is_empty() {
+            let available = state.data.len().min(cb as usize);
             let dst = unsafe { std::slice::from_raw_parts_mut(pv as *mut u8, available) };
             for (i, byte) in state.data.drain(..available).enumerate() {
                 dst[i] = byte;
@@ -202,13 +318,27 @@ impl ISequentialStream_Impl for SftpStream {
 
             let mut pos = self.position.lock().unwrap();
             *pos += available as u64;
+
+            if !pcbread.is_null() {
+                unsafe { *pcbread = available as u32 };
+            }
+            return S_OK;
         }
 
         if !pcbread.is_null() {
-            unsafe { *pcbread = available as u32 };
+            unsafe { *pcbread = 0 };
         }
 
-        if available == 0 { S_FALSE } else { S_OK }
+        extern "system" {
+            fn PostQuitMessage(exit_code: i32);
+        }
+        unsafe { PostQuitMessage(0); }
+
+        if state.error.is_some() {
+            E_FAIL
+        } else {
+            S_FALSE
+        }
     }
 
     fn Write(&self, _pv: *const c_void, _cb: u32, _pcbwritten: *mut u32) -> HRESULT {
@@ -364,23 +494,87 @@ impl VirtualFileDataObject {
 
     fn build_file_contents_stream(&self, index: usize) -> windows::core::Result<STGMEDIUM> {
         let entry = &self.entries[index];
-        let stream = SftpStream::new(
-            self.rt_handle.clone(),
-            self.ssh_state.clone(),
-            entry.remote_path.clone(),
-            entry.file_size,
-            self.app_handle.clone(),
-            self.transfer_id.clone(),
-            self.display_name.clone(),
-            self.total_size,
-            self.shared_bytes.clone(),
-        );
-        let istream: IStream = stream.into();
+
+        let rt_handle = self.rt_handle.clone();
+        let ssh_state = self.ssh_state.clone();
+        let remote_path = entry.remote_path.clone();
+        let file_size = entry.file_size;
+        let app_handle = self.app_handle.clone();
+        let transfer_id = self.transfer_id.clone();
+        let display_name = self.display_name.clone();
+        let total_size = self.total_size;
+        let shared_bytes = self.shared_bytes.clone();
+
+        let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<usize, String>>();
+
+        std::thread::spawn(move || {
+            unsafe {
+                let _ = CoInitializeEx(Some(std::ptr::null()), COINIT_APARTMENTTHREADED);
+            }
+
+            let stream = SftpStream::new(
+                rt_handle, ssh_state, remote_path, file_size,
+                app_handle, transfer_id, display_name,
+                total_size, shared_bytes,
+            );
+            let istream: IStream = stream.into();
+
+            let mut marshal_stm: *mut c_void = std::ptr::null_mut();
+            let hr = unsafe {
+                CoMarshalInterThreadInterfaceInStream(
+                    &IStream::IID,
+                    istream.as_raw(),
+                    &mut marshal_stm,
+                )
+            };
+
+            if hr.is_err() {
+                tx.send(Err(format!("Marshal failed: 0x{:08x}", hr.0))).ok();
+                drop(istream);
+                unsafe { CoUninitialize(); }
+                return;
+            }
+
+            tx.send(Ok(marshal_stm as usize)).ok();
+
+            // Pump messages — COM dispatches Read calls to this thread
+            unsafe {
+                let mut msg: RawMSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+
+            drop(istream);
+            unsafe { CoUninitialize(); }
+        });
+
+        // Wait for the marshaled stream pointer from the worker
+        let marshal_raw = rx.recv()
+            .map_err(|_| Error::new(E_FAIL, HSTRING::new()))?
+            .map_err(|e| Error::new(E_FAIL, HSTRING::from(e.as_str())))?;
+
+        // Unmarshal to get the proxy IStream on the main thread.
+        // CoGetInterfaceAndReleaseStream releases the marshal stream for us.
+        let mut ppv: *mut c_void = std::ptr::null_mut();
+        let hr = unsafe {
+            CoGetInterfaceAndReleaseStream(
+                marshal_raw as *mut c_void,
+                &IStream::IID,
+                &mut ppv,
+            )
+        };
+        if hr.is_err() {
+            return Err(Error::new(hr, HSTRING::from("Unmarshal failed")));
+        }
+
+        let proxy = unsafe { IStream::from_raw(ppv) };
 
         Ok(STGMEDIUM {
             tymed: TYMED_ISTREAM.0 as u32,
             u: STGMEDIUM_0 {
-                pstm: std::mem::ManuallyDrop::new(Some(istream)),
+                pstm: std::mem::ManuallyDrop::new(Some(proxy)),
             },
             pUnkForRelease: std::mem::ManuallyDrop::new(None),
         })
@@ -577,29 +771,25 @@ pub fn start_drag(
     entries: Vec<VirtualFileEntry>,
     total_size: u64,
     display_name: String,
-    main_thread_id: u32,
     app_handle: AppHandle,
     transfer_id: String,
 ) -> std::result::Result<(), String> {
-    extern "system" {
-        fn GetCurrentThreadId() -> u32;
-        fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: i32) -> i32;
-    }
-
     unsafe {
         let hr = OleInitialize(Some(std::ptr::null_mut()));
         if hr.is_err() {
             return Err(format!("OleInitialize failed: {:?}", hr));
         }
-
-        let drag_thread_id = GetCurrentThreadId();
-        AttachThreadInput(drag_thread_id, main_thread_id, 1);
     }
 
     let cf_descriptor =
         unsafe { RegisterClipboardFormatW(w!("FileGroupDescriptorW")) as u16 };
     let cf_contents =
         unsafe { RegisterClipboardFormatW(w!("FileContents")) as u16 };
+
+    let shared_bytes = Arc::new(AtomicU64::new(0));
+
+    DRAG_PROGRESS_BYTES.store(0, Ordering::Relaxed);
+    DRAG_PROGRESS_TOTAL.store(total_size, Ordering::Relaxed);
 
     let data_object: IDataObject = VirtualFileDataObject {
         entries,
@@ -611,7 +801,7 @@ pub fn start_drag(
         ssh_state,
         app_handle,
         transfer_id,
-        shared_bytes: Arc::new(AtomicU64::new(0)),
+        shared_bytes: shared_bytes.clone(),
     }
     .into();
 
@@ -620,10 +810,13 @@ pub fn start_drag(
     unsafe {
         let mut effect = DROPEFFECT::default();
         let _ = DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut effect);
-
-        let drag_thread_id = GetCurrentThreadId();
-        AttachThreadInput(drag_thread_id, main_thread_id, 0);
     }
+
+    // Signal completion: total=u64::MAX tells the frontend the drag is done
+    DRAG_PROGRESS_BYTES.store(0, Ordering::Relaxed);
+    DRAG_PROGRESS_TOTAL.store(u64::MAX, Ordering::Relaxed);
+
+    unsafe { OleUninitialize(); }
 
     Ok(())
 }

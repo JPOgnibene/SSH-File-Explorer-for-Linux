@@ -137,6 +137,7 @@ function App() {
 
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [dragOverWindow, setDragOverWindow] = useState(false);
+  const [activeDrag, setActiveDrag] = useState<string | null>(null);
 
   const isPermissionError = (err: unknown): boolean => {
     const msg = String(err).toLowerCase();
@@ -204,6 +205,70 @@ function App() {
         }
         return [...prev, { id: p.id, type: p.transfer_type as 'upload' | 'download', fileName: p.file_name, bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes }];
       });
+    }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [connected]);
+
+  const [progressPort, setProgressPort] = useState(0);
+
+  useEffect(() => {
+    invoke<number>('get_progress_port').then(port => setProgressPort(port));
+  }, []);
+
+  useEffect(() => {
+    if (!activeDrag || !progressPort) return;
+    const dragTransfer = transfers.find(t => t.type === 'download' && t.id.startsWith('drag-'));
+    if (!dragTransfer) return;
+    const SENTINEL = 18446744073709551615;
+    const interval = setInterval(async () => {
+      try {
+        const resp = await fetch(`http://127.0.0.1:${progressPort}/`);
+        const data = await resp.json();
+        if (data.total >= SENTINEL) {
+          clearInterval(interval);
+          setActiveDrag(null);
+          document.body.style.cursor = '';
+          setTransfers(prev => {
+            const idx = prev.findIndex(t => t.id === dragTransfer.id);
+            if (idx >= 0) {
+              const updated = [...prev];
+              updated[idx] = { ...updated[idx], bytesTransferred: 1, totalBytes: 1 };
+              return updated;
+            }
+            return prev;
+          });
+          setTimeout(() => {
+            setTransfers(prev => prev.filter(t => t.id !== dragTransfer.id));
+          }, 1500);
+          return;
+        }
+        if (data.total > 0 && data.bytes > 0) {
+          setTransfers(prev => {
+            const idx = prev.findIndex(t => t.id === dragTransfer.id);
+            if (idx >= 0) {
+              const updated = [...prev];
+              const capped = Math.min(data.bytes, data.total);
+              updated[idx] = { ...updated[idx], bytesTransferred: capped, totalBytes: data.total };
+              return updated;
+            }
+            return prev;
+          });
+        }
+      } catch {}
+    }, 150);
+    return () => clearInterval(interval);
+  }, [activeDrag, progressPort]);
+
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ id: string }>("transfer-complete", (event) => {
+      if (cancelled) return;
+      const id = event.payload.id;
+      setTimeout(() => {
+        setTransfers(prev => prev.filter(t => t.id !== id));
+      }, 1500);
     }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
     return () => { cancelled = true; unlisten?.(); };
   }, [connected]);
@@ -672,6 +737,8 @@ function App() {
     const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: file.size }]);
+    setActiveDrag(file.name);
+    document.body.style.cursor = 'grabbing';
     try {
       await invoke("start_virtual_drag", {
         transferId,
@@ -683,7 +750,14 @@ function App() {
     } catch (e) {
       setError(String(e));
     } finally {
-      setTransfers(prev => prev.filter(t => t.id !== transferId));
+      setActiveDrag(null);
+      document.body.style.cursor = '';
+      setTimeout(() => {
+        setTransfers(prev => prev.filter(t => {
+          if (t.id === transferId && t.bytesTransferred === 0) return false;
+          return true;
+        }));
+      }, 1000);
     }
   };
 
@@ -1405,6 +1479,16 @@ function App() {
             </svg>
             <p className="text-emerald-400 font-medium">Drop files to upload</p>
             <p className="text-emerald-400/50 text-xs mt-1">Uploading to {currentPath}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Active drag-out indicator */}
+      {activeDrag && (
+        <div className="fixed inset-0 bg-blue-500/5 border-2 border-dashed border-blue-500/40 flex items-end justify-center z-40 pointer-events-none pb-8">
+          <div className="text-center bg-zinc-900/90 px-8 py-4 rounded-2xl border border-blue-500/30 animate-pulse">
+            <p className="text-blue-400 font-medium">Drag to a folder to save "{activeDrag}"</p>
+            <p className="text-blue-400/50 text-xs mt-1">Drop in a folder in File Explorer to save</p>
           </div>
         </div>
       )}
