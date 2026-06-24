@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter};
 use tokio::runtime::Handle as TokioHandle;
@@ -12,6 +12,7 @@ use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::*;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+use windows::Win32::UI::Shell::{IDataObjectAsyncCapability, IDataObjectAsyncCapability_Impl};
 
 use serde::Serialize;
 
@@ -34,6 +35,11 @@ pub fn start_progress_server() {
     PROGRESS_PORT.store(port, Ordering::Relaxed);
 
     std::thread::spawn(move || {
+        // Keep the MTA alive for the process lifetime so drag-out IStream
+        // stubs dispatch Read calls to COM thread pool threads instead of
+        // the main STA thread.
+        unsafe { CoInitializeEx(Some(std::ptr::null()), COINIT_MULTITHREADED).ok(); }
+
         let mut buf = [0u8; 1024];
         let cors = "\
             Access-Control-Allow-Origin: *\r\n\
@@ -75,21 +81,7 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const STGTY_STREAM: u32 = 2;
 
-#[repr(C)]
-struct RawMSG {
-    hwnd: isize,
-    message: u32,
-    wparam: usize,
-    lparam: isize,
-    time: u32,
-    pt_x: i32,
-    pt_y: i32,
-}
-
 extern "system" {
-    fn GetMessageW(msg: *mut RawMSG, hwnd: isize, min: u32, max: u32) -> i32;
-    fn TranslateMessage(msg: *const RawMSG) -> i32;
-    fn DispatchMessageW(msg: *const RawMSG) -> isize;
     fn CoMarshalInterThreadInterfaceInStream(
         riid: *const GUID,
         punk: *mut c_void,
@@ -289,6 +281,10 @@ impl SftpStream {
             }
             cvar.notify_all();
 
+            // Signal the frontend that the drag transfer is complete
+            DRAG_PROGRESS_BYTES.store(0, Ordering::Relaxed);
+            DRAG_PROGRESS_TOTAL.store(u64::MAX, Ordering::Relaxed);
+
             let _ = app_for_complete.emit("transfer-complete", TransferComplete {
                 id: id_for_complete,
             });
@@ -328,11 +324,6 @@ impl ISequentialStream_Impl for SftpStream {
         if !pcbread.is_null() {
             unsafe { *pcbread = 0 };
         }
-
-        extern "system" {
-            fn PostQuitMessage(exit_code: i32);
-        }
-        unsafe { PostQuitMessage(0); }
 
         if state.error.is_some() {
             E_FAIL
@@ -420,7 +411,7 @@ impl IStream_Impl for SftpStream {
 
 // --- IDataObject with multi-file virtual descriptors ---
 
-#[implement(IDataObject)]
+#[implement(IDataObject, IDataObjectAsyncCapability)]
 struct VirtualFileDataObject {
     entries: Vec<VirtualFileEntry>,
     total_size: u64,
@@ -432,6 +423,8 @@ struct VirtualFileDataObject {
     app_handle: AppHandle,
     transfer_id: String,
     shared_bytes: Arc<AtomicU64>,
+    async_mode: AtomicBool,
+    in_operation: AtomicBool,
 }
 
 impl VirtualFileDataObject {
@@ -509,7 +502,7 @@ impl VirtualFileDataObject {
 
         std::thread::spawn(move || {
             unsafe {
-                let _ = CoInitializeEx(Some(std::ptr::null()), COINIT_APARTMENTTHREADED);
+                let _ = CoInitializeEx(Some(std::ptr::null()), COINIT_MULTITHREADED);
             }
 
             let stream = SftpStream::new(
@@ -537,15 +530,9 @@ impl VirtualFileDataObject {
 
             tx.send(Ok(marshal_stm as usize)).ok();
 
-            // Pump messages — COM dispatches Read calls to this thread
-            unsafe {
-                let mut msg: RawMSG = std::mem::zeroed();
-                while GetMessageW(&mut msg, 0, 0, 0) > 0 {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
-
+            // MTA: no message pump needed. COM dispatches Read calls to
+            // thread pool threads directly. Drop our reference and exit;
+            // the MTA stays alive via the progress server thread.
             drop(istream);
             unsafe { CoUninitialize(); }
         });
@@ -690,6 +677,41 @@ impl IDataObject_Impl for VirtualFileDataObject {
     }
 }
 
+// --- IDataObjectAsyncCapability ---
+// Tells Explorer to extract file data asynchronously so DoDragDrop returns
+// immediately after the drop, freeing the main thread.
+
+#[allow(non_snake_case)]
+impl IDataObjectAsyncCapability_Impl for VirtualFileDataObject {
+    fn SetAsyncMode(&self, fdoopasync: BOOL) -> windows::core::Result<()> {
+        self.async_mode.store(fdoopasync.as_bool(), Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn GetAsyncMode(&self) -> windows::core::Result<BOOL> {
+        Ok(BOOL::from(self.async_mode.load(Ordering::SeqCst)))
+    }
+
+    fn StartOperation(&self, _pbcreserved: Option<&IBindCtx>) -> windows::core::Result<()> {
+        self.in_operation.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn InOperation(&self) -> windows::core::Result<BOOL> {
+        Ok(BOOL::from(self.in_operation.load(Ordering::SeqCst)))
+    }
+
+    fn EndOperation(
+        &self,
+        _hresult: HRESULT,
+        _pbcreserved: Option<&IBindCtx>,
+        _dweffects: u32,
+    ) -> windows::core::Result<()> {
+        self.in_operation.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 // --- IEnumFORMATETC ---
 
 #[implement(IEnumFORMATETC)]
@@ -765,6 +787,12 @@ impl IEnumFORMATETC_Impl for FormatEnumerator {
 
 // --- Entry point ---
 
+pub fn init_ole_main_thread() {
+    unsafe {
+        let _ = OleInitialize(Some(std::ptr::null_mut()));
+    }
+}
+
 pub fn start_drag(
     rt_handle: TokioHandle,
     ssh_state: SshSession,
@@ -774,13 +802,6 @@ pub fn start_drag(
     app_handle: AppHandle,
     transfer_id: String,
 ) -> std::result::Result<(), String> {
-    unsafe {
-        let hr = OleInitialize(Some(std::ptr::null_mut()));
-        if hr.is_err() {
-            return Err(format!("OleInitialize failed: {:?}", hr));
-        }
-    }
-
     let cf_descriptor =
         unsafe { RegisterClipboardFormatW(w!("FileGroupDescriptorW")) as u16 };
     let cf_contents =
@@ -802,21 +823,27 @@ pub fn start_drag(
         app_handle,
         transfer_id,
         shared_bytes: shared_bytes.clone(),
+        async_mode: AtomicBool::new(true),
+        in_operation: AtomicBool::new(false),
     }
     .into();
 
     let drop_source: IDropSource = SimpleDropSource.into();
 
+    let effect;
     unsafe {
-        let mut effect = DROPEFFECT::default();
-        let _ = DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut effect);
+        let mut eff = DROPEFFECT::default();
+        let _ = DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut eff);
+        effect = eff;
     }
 
-    // Signal completion: total=u64::MAX tells the frontend the drag is done
-    DRAG_PROGRESS_BYTES.store(0, Ordering::Relaxed);
-    DRAG_PROGRESS_TOTAL.store(u64::MAX, Ordering::Relaxed);
-
-    unsafe { OleUninitialize(); }
+    // With IDataObjectAsyncCapability, DoDragDrop returns immediately after
+    // the drop. If the drag was cancelled (no drop target accepted it),
+    // signal completion now. Otherwise the download thread signals when done.
+    if effect == DROPEFFECT(0) {
+        DRAG_PROGRESS_BYTES.store(0, Ordering::Relaxed);
+        DRAG_PROGRESS_TOTAL.store(u64::MAX, Ordering::Relaxed);
+    }
 
     Ok(())
 }

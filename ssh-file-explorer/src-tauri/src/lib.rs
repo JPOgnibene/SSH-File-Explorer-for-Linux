@@ -1030,6 +1030,8 @@ fn get_progress_port() -> u16 {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
+    virtual_drag::init_ole_main_thread();
+    #[cfg(windows)]
     virtual_drag::start_progress_server();
 
     tauri::Builder::default()

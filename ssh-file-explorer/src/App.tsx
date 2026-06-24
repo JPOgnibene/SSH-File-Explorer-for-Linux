@@ -749,15 +749,9 @@ function App() {
       });
     } catch (e) {
       setError(String(e));
-    } finally {
       setActiveDrag(null);
       document.body.style.cursor = '';
-      setTimeout(() => {
-        setTransfers(prev => prev.filter(t => {
-          if (t.id === transferId && t.bytesTransferred === 0) return false;
-          return true;
-        }));
-      }, 1000);
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
     }
   };
 
