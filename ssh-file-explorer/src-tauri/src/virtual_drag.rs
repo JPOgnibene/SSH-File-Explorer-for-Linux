@@ -243,6 +243,11 @@ impl SftpStream {
                 use tokio::io::AsyncReadExt;
                 let mut chunk = vec![0u8; 65536];
                 loop {
+                    if crate::is_transfer_cancelled(&params.transfer_id) {
+                        crate::CANCELLED_TRANSFERS.lock().unwrap().remove(&params.transfer_id);
+                        return Err("Transfer cancelled".to_string());
+                    }
+
                     let n = file
                         .read(&mut chunk)
                         .await

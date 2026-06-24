@@ -1,8 +1,16 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use russh::*;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+static CANCELLED_TRANSFERS: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+fn is_transfer_cancelled(id: &str) -> bool {
+    CANCELLED_TRANSFERS.lock().unwrap().contains(id)
+}
 
 #[cfg(windows)]
 mod virtual_drag;
@@ -738,6 +746,12 @@ async fn download_file(app: AppHandle, transfer_id: String, remote_path: String,
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     loop {
+        if is_transfer_cancelled(&transfer_id) {
+            CANCELLED_TRANSFERS.lock().unwrap().remove(&transfer_id);
+            drop(local_file);
+            let _ = tokio::fs::remove_file(&local_path).await;
+            return Err("Transfer cancelled".to_string());
+        }
         let n = remote_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
         if n == 0 { break; }
         local_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
@@ -804,6 +818,12 @@ async fn download_directory(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     for rel_path in &file_list {
+        if is_transfer_cancelled(&transfer_id) {
+            CANCELLED_TRANSFERS.lock().unwrap().remove(&transfer_id);
+            let _ = tokio::fs::remove_dir_all(&local_path).await;
+            return Err("Transfer cancelled".to_string());
+        }
+
         let remote_file_path = format!("{}/{}", remote_path, rel_path);
         let local_file_path = std::path::Path::new(&local_path).join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
@@ -819,6 +839,12 @@ async fn download_directory(
 
         let mut buf = vec![0u8; 65536];
         loop {
+            if is_transfer_cancelled(&transfer_id) {
+                CANCELLED_TRANSFERS.lock().unwrap().remove(&transfer_id);
+                drop(local_file);
+                let _ = tokio::fs::remove_dir_all(&local_path).await;
+                return Err("Transfer cancelled".to_string());
+            }
             let n = remote_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
             if n == 0 { break; }
             local_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
@@ -861,7 +887,12 @@ async fn upload_file(app: AppHandle, transfer_id: String, local_path: String, re
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    let mut cancelled = false;
     loop {
+        if is_transfer_cancelled(&transfer_id) {
+            cancelled = true;
+            break;
+        }
         let n = local_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
         if n == 0 { break; }
         remote_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
@@ -876,6 +907,15 @@ async fn upload_file(app: AppHandle, transfer_id: String, local_path: String, re
     }
 
     remote_file.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+
+    if cancelled {
+        CANCELLED_TRANSFERS.lock().unwrap().remove(&transfer_id);
+        let s = state.lock().await;
+        if let Some(session) = s.session.as_ref() {
+            let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&remote_path))).await;
+        }
+        return Err("Transfer cancelled".to_string());
+    }
 
     Ok(())
 }
@@ -1081,6 +1121,15 @@ async fn upload_directory(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     for (file_path, remote_file_path) in &files {
+        if is_transfer_cancelled(&transfer_id) {
+            CANCELLED_TRANSFERS.lock().unwrap().remove(&transfer_id);
+            let s = state.lock().await;
+            if let Some(session) = s.session.as_ref() {
+                let _ = exec_ssh(session, &format!("rm -rf {}", shell_escape(&remote_path))).await;
+            }
+            return Err("Transfer cancelled".to_string());
+        }
+
         let mut local_file = tokio::fs::File::open(file_path)
             .await
             .map_err(|e| format!("Open error: {}", e))?;
@@ -1091,6 +1140,15 @@ async fn upload_directory(
 
         let mut buf = vec![0u8; 65536];
         loop {
+            if is_transfer_cancelled(&transfer_id) {
+                CANCELLED_TRANSFERS.lock().unwrap().remove(&transfer_id);
+                drop(remote_file);
+                let s = state.lock().await;
+                if let Some(session) = s.session.as_ref() {
+                    let _ = exec_ssh(session, &format!("rm -rf {}", shell_escape(&remote_path))).await;
+                }
+                return Err("Transfer cancelled".to_string());
+            }
             let n = local_file
                 .read(&mut buf)
                 .await
@@ -1157,7 +1215,12 @@ async fn sudo_upload_file(
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    let mut cancelled = false;
     loop {
+        if is_transfer_cancelled(&transfer_id) {
+            cancelled = true;
+            break;
+        }
         let n = local_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
         if n == 0 { break; }
         remote_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
@@ -1172,6 +1235,15 @@ async fn sudo_upload_file(
     }
 
     remote_file.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+
+    if cancelled {
+        CANCELLED_TRANSFERS.lock().unwrap().remove(&transfer_id);
+        let s = state.lock().await;
+        if let Some(session) = s.session.as_ref() {
+            let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&temp_path))).await;
+        }
+        return Err("Transfer cancelled".to_string());
+    }
 
     let result = {
         let s = state.lock().await;
@@ -1263,7 +1335,13 @@ async fn sudo_upload_directory(
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    let mut cancelled = false;
     for (file_path, temp_file_path) in &files {
+        if is_transfer_cancelled(&transfer_id) {
+            cancelled = true;
+            break;
+        }
+
         let mut local_file = tokio::fs::File::open(file_path).await
             .map_err(|e| format!("Open error: {}", e))?;
         let mut remote_file = sftp.create(temp_file_path).await
@@ -1271,6 +1349,10 @@ async fn sudo_upload_directory(
 
         let mut buf = vec![0u8; 65536];
         loop {
+            if is_transfer_cancelled(&transfer_id) {
+                cancelled = true;
+                break;
+            }
             let n = local_file.read(&mut buf).await.map_err(|e| format!("Read error: {}", e))?;
             if n == 0 { break; }
             remote_file.write_all(&buf[..n]).await.map_err(|e| format!("Write error: {}", e))?;
@@ -1284,6 +1366,16 @@ async fn sudo_upload_directory(
             });
         }
         remote_file.shutdown().await.map_err(|e| format!("Close error: {}", e))?;
+        if cancelled { break; }
+    }
+
+    if cancelled {
+        CANCELLED_TRANSFERS.lock().unwrap().remove(&transfer_id);
+        let s = state.lock().await;
+        if let Some(session) = s.session.as_ref() {
+            let _ = exec_ssh(session, &format!("rm -rf {}", shell_escape(&temp_base))).await;
+        }
+        return Err("Transfer cancelled".to_string());
     }
 
     // Create target dirs and move files with sudo
@@ -1357,6 +1449,11 @@ fn format_permissions(mode: &str, is_dir: bool) -> String {
 }
 
 #[tauri::command]
+fn cancel_transfer(transfer_id: String) {
+    CANCELLED_TRANSFERS.lock().unwrap().insert(transfer_id);
+}
+
+#[tauri::command]
 fn get_progress_port() -> u16 {
     #[cfg(windows)]
     { virtual_drag::progress_port() }
@@ -1403,6 +1500,7 @@ pub fn run() {
             upload_directory,
             sudo_upload_file,
             sudo_upload_directory,
+            cancel_transfer,
             get_saved_connections,
             save_connection,
             get_connection_password,

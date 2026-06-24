@@ -312,7 +312,7 @@ function App() {
                   }
                 }
               } catch (e) {
-                setError(String(e));
+                if (!String(e).includes("Transfer cancelled")) setError(String(e));
               } finally {
                 setTransfers(prev => prev.filter(t => t.id !== transferId));
               }
@@ -759,7 +759,7 @@ function App() {
         setTransfers(prev => prev.filter(t => t.id !== transferId));
       }
     } catch (e) {
-      setError(String(e));
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
     }
   };
 
@@ -778,7 +778,7 @@ function App() {
         isDir: file.is_dir,
       });
     } catch (e) {
-      setError(String(e));
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
       setTransfers(prev => prev.filter(t => t.id !== transferId));
     } finally {
       setActiveDrag(null);
@@ -807,14 +807,14 @@ function App() {
             }
           }
         } catch (e) {
-          setError(String(e));
+          if (!String(e).includes("Transfer cancelled")) setError(String(e));
         } finally {
           setTransfers(prev => prev.filter(t => t.id !== transferId));
         }
       }
       await listFiles(currentPath);
     } catch (e) {
-      setError(String(e));
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
     }
   };
 
@@ -838,13 +838,13 @@ function App() {
           }
         }
       } catch (e) {
-        setError(String(e));
+        if (!String(e).includes("Transfer cancelled")) setError(String(e));
       } finally {
         setTransfers(prev => prev.filter(t => t.id !== transferId));
       }
       await listFiles(currentPath);
     } catch (e) {
-      setError(String(e));
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
     }
   };
 
@@ -1530,6 +1530,18 @@ function App() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                   )}
                 </svg>
+                <button
+                  onClick={async () => {
+                    try { await invoke("cancel_transfer", { transferId: transfer.id }); } catch {}
+                    setTransfers(prev => prev.filter(t => t.id !== transfer.id));
+                  }}
+                  className="text-zinc-500 hover:text-red-400 transition-colors shrink-0"
+                  title="Cancel transfer"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
                 <span className="text-xs text-zinc-300 truncate w-36">{transfer.fileName}</span>
                 <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                   <div
