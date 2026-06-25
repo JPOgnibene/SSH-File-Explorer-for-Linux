@@ -1131,6 +1131,102 @@ async fn start_virtual_drag(
     rx.await.map_err(|_| "Drag thread error".to_string())?
 }
 
+#[derive(serde::Deserialize)]
+struct DragFileInfo {
+    name: String,
+    remote_path: String,
+    size: u64,
+    is_dir: bool,
+}
+
+#[tauri::command]
+async fn start_multi_drag(
+    app: AppHandle,
+    transfer_id: String,
+    files: Vec<DragFileInfo>,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
+    if files.is_empty() { return Ok(()); }
+
+    let rt_handle = tokio::runtime::Handle::current();
+    let ssh_state = state.inner().clone();
+
+    let mut all_entries = Vec::new();
+    let mut total_size = 0u64;
+
+    for file in &files {
+        if file.is_dir {
+            let output = {
+                let s = state.lock().await;
+                let session = s.session.as_ref().ok_or("Not connected")?;
+                let cmd = format!(
+                    "find {} -printf '%y|%s|%P\\n' 2>/dev/null",
+                    shell_escape(&file.remote_path)
+                );
+                exec_ssh(session, &cmd).await?
+            };
+            for line in output.lines() {
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                if parts.len() < 3 { continue; }
+                let ftype = parts[0];
+                let size: u64 = parts[1].parse().unwrap_or(0);
+                let rel = parts[2];
+                let is_entry_dir = ftype == "d";
+                let relative = if rel.is_empty() {
+                    file.name.clone()
+                } else {
+                    format!("{}/{}", file.name, rel)
+                };
+                let full_remote = if rel.is_empty() {
+                    file.remote_path.clone()
+                } else {
+                    format!("{}/{}", file.remote_path, rel)
+                };
+                if !is_entry_dir { total_size += size; }
+                all_entries.push(virtual_drag::VirtualFileEntry {
+                    relative_path: relative,
+                    remote_path: full_remote,
+                    is_dir: is_entry_dir,
+                    file_size: if is_entry_dir { 0 } else { size },
+                });
+            }
+        } else {
+            total_size += file.size;
+            all_entries.push(virtual_drag::VirtualFileEntry {
+                relative_path: file.name.clone(),
+                remote_path: file.remote_path.clone(),
+                is_dir: false,
+                file_size: file.size,
+            });
+        }
+    }
+
+    if all_entries.is_empty() {
+        return Err("No files to drag".to_string());
+    }
+
+    let display_name = if files.len() == 1 { files[0].name.clone() } else { format!("{} items", files.len()) };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let app_for_drag = app.clone();
+
+    app.run_on_main_thread(move || {
+        let result = virtual_drag::start_drag(
+            rt_handle,
+            ssh_state,
+            all_entries,
+            total_size,
+            display_name,
+            app_for_drag,
+            transfer_id,
+        );
+        let _ = tx.send(result);
+    }).map_err(|e| format!("Failed to schedule drag on main thread: {}", e))?;
+
+    rx.await.map_err(|_| "Drag thread error".to_string())?
+}
+
 #[tauri::command]
 async fn is_local_directory(path: String) -> Result<bool, String> {
     tokio::fs::metadata(&path)
@@ -1610,6 +1706,7 @@ pub fn run() {
             download_file,
             download_directory,
             start_virtual_drag,
+            start_multi_drag,
             get_progress_port,
             is_local_directory,
             upload_file,

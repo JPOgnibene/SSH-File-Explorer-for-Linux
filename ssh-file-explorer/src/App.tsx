@@ -131,6 +131,9 @@ function App() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: FileEntry | null } | null>(null);
   const [clipboard, setClipboard] = useState<{ path: string; name: string; is_dir: boolean } | null>(null);
 
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const lastClickedRef = useRef<string | null>(null);
+
   const [dirWritable, setDirWritable] = useState(false);
   const [dirSudoWritable, setDirSudoWritable] = useState(false);
   const [fileWritable, setFileWritable] = useState(true);
@@ -433,6 +436,7 @@ function App() {
         return a.name.localeCompare(b.name);
       });
       setFiles(entries);
+      setSelectedFiles(new Set());
       setCurrentPath(path);
       if (navSkipPushRef.current) {
         navSkipPushRef.current = false;
@@ -610,6 +614,7 @@ function App() {
     setError("");
     setSudoPassword("");
     setClipboard(null);
+    setSelectedFiles(new Set());
     closeEditor();
   };
 
@@ -862,6 +867,29 @@ function App() {
     }
   };
 
+  const handleMultiDownload = async (targets: FileEntry[]) => {
+    const selected = await open({ multiple: false, directory: true, title: `Save ${targets.length} items to...` });
+    if (!selected) return;
+    const destDir = String(selected);
+    for (const file of targets) {
+      const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+      const localPath = `${destDir}${destDir.endsWith("\\") || destDir.endsWith("/") ? "" : "/"}${file.name}`;
+      const transferId = `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
+      try {
+        if (file.is_dir) {
+          await invoke("download_directory", { transferId, remotePath, localPath });
+        } else {
+          await invoke("download_file", { transferId, remotePath, localPath });
+        }
+      } catch (e) {
+        if (!String(e).includes("Transfer cancelled")) setError(String(e));
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
+      }
+    }
+  };
+
   const handleDragOut = async (file: FileEntry) => {
     const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -876,6 +904,30 @@ function App() {
         fileSize: file.size,
         isDir: file.is_dir,
       });
+    } catch (e) {
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+    } finally {
+      setActiveDrag(null);
+      document.body.style.cursor = '';
+    }
+  };
+
+  const handleMultiDragOut = async (targets: FileEntry[]) => {
+    const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const totalSize = targets.reduce((sum, f) => sum + f.size, 0);
+    const label = `${targets.length} items`;
+    setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: label, bytesTransferred: 0, totalBytes: totalSize }]);
+    setActiveDrag(label);
+    document.body.style.cursor = 'grabbing';
+    try {
+      const filesArg = targets.map(f => ({
+        name: f.name,
+        remote_path: currentPath === "/" ? `/${f.name}` : `${currentPath}/${f.name}`,
+        size: f.size,
+        is_dir: f.is_dir,
+      }));
+      await invoke("start_multi_drag", { transferId, files: filesArg });
     } catch (e) {
       if (!String(e).includes("Transfer cancelled")) setError(String(e));
       setTransfers(prev => prev.filter(t => t.id !== transferId));
@@ -1516,12 +1568,41 @@ function App() {
                 files.map((file) => (
                   <tr
                     key={file.name}
-                    onClick={() => openFile(file)}
-                    onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, file }); }}
+                    onClick={(e) => {
+                      if (e.ctrlKey || e.metaKey) {
+                        e.preventDefault();
+                        setSelectedFiles(prev => {
+                          const next = new Set(prev);
+                          if (next.has(file.name)) next.delete(file.name); else next.add(file.name);
+                          return next;
+                        });
+                        lastClickedRef.current = file.name;
+                      } else if (e.shiftKey && lastClickedRef.current) {
+                        e.preventDefault();
+                        const names = files.map(f => f.name);
+                        const a = names.indexOf(lastClickedRef.current);
+                        const b = names.indexOf(file.name);
+                        const [start, end] = a < b ? [a, b] : [b, a];
+                        setSelectedFiles(new Set(names.slice(start, end + 1)));
+                      } else {
+                        setSelectedFiles(new Set());
+                        lastClickedRef.current = file.name;
+                        openFile(file);
+                      }
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      if (!selectedFiles.has(file.name)) {
+                        setSelectedFiles(new Set());
+                      }
+                      setContextMenu({ x: e.clientX, y: e.clientY, file });
+                    }}
                     className={`border-b border-zinc-800/30 transition ${
-                      file.is_dir
-                        ? "hover:bg-zinc-900/50 cursor-pointer"
-                        : "hover:bg-zinc-900/30 cursor-pointer"
+                      selectedFiles.has(file.name)
+                        ? "bg-blue-500/20 hover:bg-blue-500/30"
+                        : file.is_dir
+                          ? "hover:bg-zinc-900/50 cursor-pointer"
+                          : "hover:bg-zinc-900/30 cursor-pointer"
                     } group ${
                       editingFile &&
                       editingFile === (currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`)
@@ -1552,10 +1633,14 @@ function App() {
                           onMouseDown={(e) => {
                             e.stopPropagation();
                             e.preventDefault();
-                            handleDragOut(file);
+                            if (selectedFiles.size > 1 && selectedFiles.has(file.name)) {
+                              handleMultiDragOut(files.filter(f => selectedFiles.has(f.name)));
+                            } else {
+                              handleDragOut(file);
+                            }
                           }}
                           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-grab"
-                          title={`Drag ${file.name} to a folder`}
+                          title={selectedFiles.size > 1 && selectedFiles.has(file.name) ? `Drag ${selectedFiles.size} items to a folder` : `Drag ${file.name} to a folder`}
                         >
                           <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
@@ -1564,10 +1649,14 @@ function App() {
                         <div
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDownload(file);
+                            if (selectedFiles.size > 1 && selectedFiles.has(file.name)) {
+                              handleMultiDownload(files.filter(f => selectedFiles.has(f.name)));
+                            } else {
+                              handleDownload(file);
+                            }
                           }}
                           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
-                          title={`Download ${file.name}`}
+                          title={selectedFiles.size > 1 && selectedFiles.has(file.name) ? `Download ${selectedFiles.size} items` : `Download ${file.name}`}
                         >
                           <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -1681,7 +1770,7 @@ function App() {
 
       {/* Status bar */}
       <div className="px-4 py-2 bg-zinc-900/30 border-t border-zinc-800 text-xs text-zinc-500 flex items-center justify-between">
-        <span>{files.length} items</span>
+        <span>{selectedFiles.size > 0 ? `${selectedFiles.size} selected · ` : ""}{files.length} items</span>
         <span>{editingFile ? editingFile : currentPath}</span>
       </div>
 
@@ -1702,10 +1791,18 @@ function App() {
             <>
               <div className="border-t border-zinc-700 my-1" />
               <button
-                onClick={() => { if (contextMenu.file) handleDownload(contextMenu.file); }}
+                onClick={() => {
+                  if (selectedFiles.size > 1 && contextMenu.file && selectedFiles.has(contextMenu.file.name)) {
+                    handleMultiDownload(files.filter(f => selectedFiles.has(f.name)));
+                  } else if (contextMenu.file) {
+                    handleDownload(contextMenu.file);
+                  }
+                }}
                 className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
               >
-                Download
+                {selectedFiles.size > 1 && contextMenu.file && selectedFiles.has(contextMenu.file.name)
+                  ? `Download ${selectedFiles.size} items`
+                  : "Download"}
               </button>
               <button
                 onClick={() => {
