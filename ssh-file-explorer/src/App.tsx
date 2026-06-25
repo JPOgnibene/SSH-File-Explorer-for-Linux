@@ -11,6 +11,9 @@ import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 import { xml } from "@codemirror/lang-xml";
 import { markdown } from "@codemirror/lang-markdown";
+import { save, open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
 interface FileEntry {
@@ -37,6 +40,14 @@ interface SshKeyInfo {
   name: string;
   key_type: string;
   encrypted: boolean;
+}
+
+interface Transfer {
+  id: string;
+  type: 'upload' | 'download';
+  fileName: string;
+  bytesTransferred: number;
+  totalBytes: number;
 }
 
 function formatSize(bytes: number): string {
@@ -113,7 +124,8 @@ function App() {
 
   const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
 
-  const [dirWritable, setDirWritable] = useState(true);
+  const [dirWritable, setDirWritable] = useState(false);
+  const [dirSudoWritable, setDirSudoWritable] = useState(false);
   const [fileWritable, setFileWritable] = useState(true);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -123,6 +135,10 @@ function App() {
   const [searchSelectedIndex, setSearchSelectedIndex] = useState(-1);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchPrefixRef = useRef("");
+
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
+  const [dragOverWindow, setDragOverWindow] = useState(false);
+  const [activeDrag, setActiveDrag] = useState<string | null>(null);
 
   const isPermissionError = (err: unknown): boolean => {
     const msg = String(err).toLowerCase();
@@ -163,7 +179,16 @@ function App() {
     if (!connected) return;
     const interval = setInterval(async () => {
       try {
-        const entries: FileEntry[] = await invoke("list_directory", { path: currentPath });
+        let entries: FileEntry[];
+        try {
+          entries = await invoke("list_directory", { path: currentPath });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            entries = await invoke("sudo_list_directory", { path: currentPath, sudoPassword });
+          } else {
+            return;
+          }
+        }
         entries.sort((a, b) => {
           if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
           return a.name.localeCompare(b.name);
@@ -172,7 +197,158 @@ function App() {
       } catch {}
     }, 20000);
     return () => clearInterval(interval);
-  }, [connected, currentPath]);
+  }, [connected, currentPath, sudoPassword]);
+
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ id: string; transfer_type: string; file_name: string; bytes_transferred: number; total_bytes: number }>("transfer-progress", (event) => {
+      if (cancelled) return;
+      const p = event.payload;
+      setTransfers(prev => {
+        const idx = prev.findIndex(t => t.id === p.id);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes };
+          return updated;
+        }
+        return [...prev, { id: p.id, type: p.transfer_type as 'upload' | 'download', fileName: p.file_name, bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes }];
+      });
+    }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [connected]);
+
+  const [progressPort, setProgressPort] = useState(0);
+
+  useEffect(() => {
+    invoke<number>('get_progress_port').then(port => setProgressPort(port));
+  }, []);
+
+  useEffect(() => {
+    if (!progressPort) return;
+    const dragTransfer = transfers.find(t => t.type === 'download' && t.id.startsWith('drag-'));
+    if (!dragTransfer) return;
+    const SENTINEL = 18446744073709551615;
+    const interval = setInterval(async () => {
+      try {
+        const resp = await fetch(`http://127.0.0.1:${progressPort}/`);
+        const data = await resp.json();
+        if (data.total >= SENTINEL) {
+          clearInterval(interval);
+          setTransfers(prev => {
+            const idx = prev.findIndex(t => t.id === dragTransfer.id);
+            if (idx >= 0) {
+              const updated = [...prev];
+              updated[idx] = { ...updated[idx], bytesTransferred: 1, totalBytes: 1 };
+              return updated;
+            }
+            return prev;
+          });
+          setTimeout(() => {
+            setTransfers(prev => prev.filter(t => t.id !== dragTransfer.id));
+          }, 1500);
+          return;
+        }
+        if (data.total > 0 && data.bytes > 0) {
+          setTransfers(prev => {
+            const idx = prev.findIndex(t => t.id === dragTransfer.id);
+            if (idx >= 0) {
+              const updated = [...prev];
+              const capped = Math.min(data.bytes, data.total);
+              updated[idx] = { ...updated[idx], bytesTransferred: capped, totalBytes: data.total };
+              return updated;
+            }
+            return prev;
+          });
+        }
+      } catch {}
+    }, 150);
+    return () => clearInterval(interval);
+  }, [transfers, progressPort]);
+
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ id: string }>("transfer-complete", (event) => {
+      if (cancelled) return;
+      const id = event.payload.id;
+      setTimeout(() => {
+        setTransfers(prev => prev.filter(t => t.id !== id));
+      }, 1500);
+    }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [connected]);
+
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow().onDragDropEvent((event) => {
+      if (cancelled) return;
+      const { type } = event.payload;
+      if (type === 'enter' || type === 'over') {
+        setDragOverWindow(true);
+      } else if (type === 'leave') {
+        setDragOverWindow(false);
+      } else if (type === 'drop') {
+        setDragOverWindow(false);
+        const paths: string[] = (event.payload as { paths?: string[] }).paths || [];
+        if (paths.length > 0) {
+          (async () => {
+            if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
+              setError("Permission denied: you do not have write access to this directory");
+              return;
+            }
+            for (const localPath of paths) {
+              const fileName = localPath.replace(/\\/g, "/").split("/").pop() || "file";
+              const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
+              const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              const isDir: boolean = await invoke("is_local_directory", { path: localPath });
+              setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
+              try {
+                if (!dirWritable && sudoPassword && dirSudoWritable) {
+                  if (isDir) {
+                    await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+                  } else {
+                    await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+                  }
+                } else if (!dirWritable) {
+                  throw new Error("Permission denied");
+                } else {
+                  try {
+                    if (isDir) {
+                      await invoke("upload_directory", { transferId, localPath, remotePath });
+                    } else {
+                      await invoke("upload_file", { transferId, localPath, remotePath });
+                    }
+                  } catch (e) {
+                    if (isPermissionError(e) && sudoPassword) {
+                      if (isDir) {
+                        await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+                      } else {
+                        await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+                      }
+                    } else {
+                      throw e;
+                    }
+                  }
+                }
+              } catch (e) {
+                if (!String(e).includes("Transfer cancelled")) setError(String(e));
+              } finally {
+                setTransfers(prev => prev.filter(t => t.id !== transferId));
+              }
+            }
+            await listFiles(currentPath);
+          })();
+        }
+      }
+    }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [connected, currentPath, dirWritable, dirSudoWritable, sudoPassword]);
+
 
   useEffect(() => {
     if (!editingFile || !editorRef.current) return;
@@ -231,21 +407,40 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const entries: FileEntry[] = await invoke("list_directory", { path });
+      let entries: FileEntry[];
+      try {
+        entries = await invoke("list_directory", { path });
+      } catch (e) {
+        if (isPermissionError(e) && sudoPassword) {
+          entries = await invoke("sudo_list_directory", { path, sudoPassword });
+        } else {
+          throw e;
+        }
+      }
       entries.sort((a, b) => {
         if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
       setFiles(entries);
       setCurrentPath(path);
-      const writable: boolean = await invoke("check_writable", { path });
+      let writable = false;
+      try {
+        writable = await invoke("check_writable", { path }) as boolean;
+      } catch {}
       setDirWritable(writable);
+      let sudoWrite = false;
+      if (!writable && sudoPassword) {
+        try {
+          sudoWrite = await invoke("check_sudo_writable", { path, sudoPassword }) as boolean;
+        } catch {}
+      }
+      setDirSudoWritable(sudoWrite);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sudoPassword]);
 
   const doConnect = async (h: string, p: number, u: string, pw: string) => {
     setConnecting(true);
@@ -514,10 +709,13 @@ function App() {
           }
         }
         if (!searchTerm) searchTerm = "*";
-        const results: { path: string; name: string; is_dir: boolean }[] = await invoke("search_files", {
-          query: searchTerm,
-          searchPath,
-        });
+        let results: { path: string; name: string; is_dir: boolean }[] = await invoke("search_files", { query: searchTerm, searchPath });
+        if (results.length === 0 && sudoPassword) {
+          try {
+            const sudoResults: { path: string; name: string; is_dir: boolean }[] = await invoke("sudo_search_files", { query: searchTerm, searchPath, sudoPassword });
+            if (sudoResults.length > 0) results = sudoResults;
+          } catch {}
+        }
         setSearchResults(results);
         setSearchSelectedIndex(-1);
       } catch (e) {
@@ -568,6 +766,140 @@ function App() {
       setFileWritable(writable);
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const handleDownload = async (file: FileEntry, fromPath?: string) => {
+    const dir = fromPath || currentPath;
+    const remotePath = dir === "/" ? `/${file.name}` : `${dir}/${file.name}`;
+    try {
+      let localPath: string | null;
+      if (file.is_dir) {
+        const selected = await open({ multiple: false, directory: true, title: `Save "${file.name}" to...` });
+        if (!selected) return;
+        localPath = `${String(selected)}${String(selected).endsWith("\\") || String(selected).endsWith("/") ? "" : "/"}${file.name}`;
+      } else {
+        localPath = await save({ defaultPath: file.name });
+      }
+      if (!localPath) return;
+      const transferId = `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
+      try {
+        if (file.is_dir) {
+          await invoke("download_directory", { transferId, remotePath, localPath });
+        } else {
+          await invoke("download_file", { transferId, remotePath, localPath });
+        }
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
+      }
+    } catch (e) {
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
+    }
+  };
+
+  const handleDragOut = async (file: FileEntry) => {
+    const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+    const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: file.size }]);
+    setActiveDrag(file.name);
+    document.body.style.cursor = 'grabbing';
+    try {
+      await invoke("start_virtual_drag", {
+        transferId,
+        remotePath,
+        fileName: file.name,
+        fileSize: file.size,
+        isDir: file.is_dir,
+      });
+    } catch (e) {
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+    } finally {
+      setActiveDrag(null);
+      document.body.style.cursor = '';
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
+      setError("Permission denied: you do not have write access to this directory");
+      return;
+    }
+    try {
+      const selected = await open({ multiple: true, directory: false });
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected.map(String) : [String(selected)];
+      for (const localPath of paths) {
+        const fileName = localPath.replace(/\\/g, "/").split("/").pop() || "uploaded_file";
+        const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
+        const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
+        try {
+          if (!dirWritable && sudoPassword && dirSudoWritable) {
+            await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+          } else if (!dirWritable) {
+            throw new Error("Permission denied");
+          } else {
+            try {
+              await invoke("upload_file", { transferId, localPath, remotePath });
+            } catch (e) {
+              if (isPermissionError(e) && sudoPassword) {
+                await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+              } else {
+                throw e;
+              }
+            }
+          }
+        } catch (e) {
+          if (!String(e).includes("Transfer cancelled")) setError(String(e));
+        } finally {
+          setTransfers(prev => prev.filter(t => t.id !== transferId));
+        }
+      }
+      await listFiles(currentPath);
+    } catch (e) {
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
+    }
+  };
+
+  const handleUploadDirectory = async () => {
+    if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
+      setError("Permission denied: you do not have write access to this directory");
+      return;
+    }
+    try {
+      const selected = await open({ multiple: false, directory: true });
+      if (!selected) return;
+      const localPath = String(selected);
+      const dirName = localPath.replace(/\\/g, "/").split("/").pop() || "folder";
+      const remotePath = currentPath === "/" ? `/${dirName}` : `${currentPath}/${dirName}`;
+      const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName: dirName, bytesTransferred: 0, totalBytes: 0 }]);
+      try {
+        if (!dirWritable && sudoPassword && dirSudoWritable) {
+          await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+        } else if (!dirWritable) {
+          throw new Error("Permission denied");
+        } else {
+          try {
+            await invoke("upload_directory", { transferId, localPath, remotePath });
+          } catch (e) {
+            if (isPermissionError(e) && sudoPassword) {
+              await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+            } else {
+              throw e;
+            }
+          }
+        }
+      } catch (e) {
+        if (!String(e).includes("Transfer cancelled")) setError(String(e));
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
+      }
+      await listFiles(currentPath);
+    } catch (e) {
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
     }
   };
 
@@ -836,6 +1168,32 @@ function App() {
         >
           + New File/Folder
         </button>
+        <div className="relative">
+          <button
+            onClick={(e) => {
+              const menu = e.currentTarget.nextElementSibling;
+              if (menu) menu.classList.toggle("hidden");
+            }}
+            className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+            title="Upload files or folder"
+          >
+            Upload
+          </button>
+          <div className="hidden absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg z-50 min-w-[120px]">
+            <button
+              onClick={(e) => { e.currentTarget.parentElement!.classList.add("hidden"); handleUpload(); }}
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 rounded-t-md cursor-pointer"
+            >
+              Files
+            </button>
+            <button
+              onClick={(e) => { e.currentTarget.parentElement!.classList.add("hidden"); handleUploadDirectory(); }}
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 rounded-b-md cursor-pointer"
+            >
+              Folder
+            </button>
+          </div>
+        </div>
 
         {!showSaveForm && (
           <button
@@ -1121,17 +1479,44 @@ function App() {
                       </>
                     )}
                     <td className="py-2 px-2">
-                      <div
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setConfirmDelete(file);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
-                        title={`Delete ${file.name}`}
-                      >
-                        <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
+                      <div className="flex items-center gap-1">
+                        <div
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            handleDragOut(file);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-grab"
+                          title={`Drag ${file.name} to a folder`}
+                        >
+                          <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                          </svg>
+                        </div>
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDownload(file);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
+                          title={`Download ${file.name}`}
+                        >
+                          <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                          </svg>
+                        </div>
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDelete(file);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
+                          title={`Delete ${file.name}`}
+                        >
+                          <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </div>
                       </div>
                     </td>
                   </tr>
@@ -1186,11 +1571,74 @@ function App() {
         )}
       </div>
 
+      {/* Transfer progress bars */}
+      {transfers.length > 0 && (
+        <div className="border-t border-zinc-800 bg-zinc-900/40">
+          {transfers.map(transfer => {
+            const pct = transfer.totalBytes > 0 ? Math.round(transfer.bytesTransferred / transfer.totalBytes * 100) : 0;
+            return (
+              <div key={transfer.id} className="flex items-center gap-3 px-4 py-1.5">
+                <svg className={`w-3.5 h-3.5 shrink-0 ${transfer.type === 'upload' ? 'text-emerald-400' : 'text-blue-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  {transfer.type === 'upload' ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  )}
+                </svg>
+                <button
+                  onClick={async () => {
+                    try { await invoke("cancel_transfer", { transferId: transfer.id }); } catch {}
+                    setTransfers(prev => prev.filter(t => t.id !== transfer.id));
+                  }}
+                  className="text-zinc-500 hover:text-red-400 transition-colors shrink-0"
+                  title="Cancel transfer"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+                <span className="text-xs text-zinc-300 truncate w-36">{transfer.fileName}</span>
+                <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-150 ${transfer.type === 'upload' ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className="text-xs text-zinc-500 w-10 text-right tabular-nums">{pct}%</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Status bar */}
       <div className="px-4 py-2 bg-zinc-900/30 border-t border-zinc-800 text-xs text-zinc-500 flex items-center justify-between">
         <span>{files.length} items</span>
         <span>{editingFile ? editingFile : currentPath}</span>
       </div>
+
+      {/* Drag-over overlay */}
+      {dragOverWindow && (
+        <div className="fixed inset-0 bg-emerald-500/5 border-2 border-dashed border-emerald-500/40 flex items-center justify-center z-40 pointer-events-none">
+          <div className="text-center bg-zinc-900/90 px-8 py-6 rounded-2xl border border-emerald-500/30">
+            <svg className="w-10 h-10 text-emerald-400 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            <p className="text-emerald-400 font-medium">Drop files to upload</p>
+            <p className="text-emerald-400/50 text-xs mt-1">Uploading to {currentPath}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Active drag-out indicator */}
+      {activeDrag && (
+        <div className="fixed inset-0 bg-blue-500/5 border-2 border-dashed border-blue-500/40 flex items-end justify-center z-40 pointer-events-none pb-8">
+          <div className="text-center bg-zinc-900/90 px-8 py-4 rounded-2xl border border-blue-500/30 animate-pulse">
+            <p className="text-blue-400 font-medium">Drag to a folder to save "{activeDrag}"</p>
+            <p className="text-blue-400/50 text-xs mt-1">Drop in a folder in File Explorer to save</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
