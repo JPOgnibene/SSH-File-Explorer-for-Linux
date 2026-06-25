@@ -708,6 +708,35 @@ async fn sudo_delete_file(path: String, is_dir: bool, sudo_password: String, sta
     Ok(())
 }
 
+#[tauri::command]
+async fn copy_path(src: String, dest: String, is_dir: bool, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = if is_dir {
+        format!("cp -r {} {} 2>&1", shell_escape(&src), shell_escape(&dest))
+    } else {
+        format!("cp {} {} 2>&1", shell_escape(&src), shell_escape(&dest))
+    };
+    let output = exec_ssh(session, &cmd).await?;
+    if !output.trim().is_empty() {
+        return Err(output.trim().to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sudo_copy_path(src: String, dest: String, is_dir: bool, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = if is_dir {
+        format!("cp -r {} {}", shell_escape(&src), shell_escape(&dest))
+    } else {
+        format!("cp {} {}", shell_escape(&src), shell_escape(&dest))
+    };
+    sudo_exec_ssh(session, &sudo_password, &cmd).await?;
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct SearchResult {
     path: String,
@@ -1574,6 +1603,8 @@ pub fn run() {
             sudo_create_file,
             sudo_create_directory,
             sudo_delete_file,
+            copy_path,
+            sudo_copy_path,
             search_files,
             sudo_search_files,
             download_file,

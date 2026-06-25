@@ -128,6 +128,9 @@ function App() {
 
   const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
 
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: FileEntry | null } | null>(null);
+  const [clipboard, setClipboard] = useState<{ path: string; name: string; is_dir: boolean } | null>(null);
+
   const [dirWritable, setDirWritable] = useState(false);
   const [dirSudoWritable, setDirSudoWritable] = useState(false);
   const [fileWritable, setFileWritable] = useState(true);
@@ -165,8 +168,10 @@ function App() {
         });
       }
     };
+    const dismissContextMenu = () => setContextMenu(null);
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("click", dismissContextMenu);
+    return () => { window.removeEventListener("keydown", handleKeyDown); window.removeEventListener("click", dismissContextMenu); };
   }, [connected]);
 
   const listFilesRef = useRef<(path: string) => Promise<void>>(null as unknown as (path: string) => Promise<void>);
@@ -604,6 +609,7 @@ function App() {
     setCurrentPath("/");
     setError("");
     setSudoPassword("");
+    setClipboard(null);
     closeEditor();
   };
 
@@ -703,6 +709,26 @@ function App() {
       await listFiles(currentPath);
     } catch (e) {
       setConfirmDelete(null);
+      setError(String(e));
+    }
+  };
+
+  const handlePaste = async () => {
+    if (!clipboard) return;
+    const dest = currentPath === "/" ? `/${clipboard.name}` : `${currentPath}/${clipboard.name}`;
+    if (clipboard.path === dest) return;
+    try {
+      try {
+        await invoke("copy_path", { src: clipboard.path, dest, isDir: clipboard.is_dir });
+      } catch (e) {
+        if (isPermissionError(e) && sudoPassword) {
+          await invoke("sudo_copy_path", { src: clipboard.path, dest, isDir: clipboard.is_dir, sudoPassword });
+        } else {
+          throw e;
+        }
+      }
+      await listFiles(currentPath);
+    } catch (e) {
       setError(String(e));
     }
   };
@@ -1446,7 +1472,10 @@ function App() {
       {/* Main content area */}
       <div className="flex-1 flex min-h-0">
         {/* File list */}
-        <div className={`overflow-auto ${editingFile ? "w-80 shrink-0 border-r border-zinc-800" : "flex-1"}`}>
+        <div
+          className={`overflow-auto ${editingFile ? "w-80 shrink-0 border-r border-zinc-800" : "flex-1"}`}
+          onContextMenu={(e) => { if ((e.target as HTMLElement).closest("tr")) return; e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, file: null }); }}
+        >
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800/50">
@@ -1488,6 +1517,7 @@ function App() {
                   <tr
                     key={file.name}
                     onClick={() => openFile(file)}
+                    onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, file }); }}
                     className={`border-b border-zinc-800/30 transition ${
                       file.is_dir
                         ? "hover:bg-zinc-900/50 cursor-pointer"
@@ -1654,6 +1684,55 @@ function App() {
         <span>{files.length} items</span>
         <span>{editingFile ? editingFile : currentPath}</span>
       </div>
+
+      {/* Context menu */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[160px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={() => setContextMenu(null)}
+        >
+          <button
+            onClick={() => listFiles(currentPath)}
+            className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+          >
+            Refresh
+          </button>
+          {contextMenu.file && (
+            <>
+              <div className="border-t border-zinc-700 my-1" />
+              <button
+                onClick={() => { if (contextMenu.file) handleDownload(contextMenu.file); }}
+                className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+              >
+                Download
+              </button>
+              <button
+                onClick={() => {
+                  if (contextMenu.file) {
+                    const path = currentPath === "/" ? `/${contextMenu.file.name}` : `${currentPath}/${contextMenu.file.name}`;
+                    setClipboard({ path, name: contextMenu.file.name, is_dir: contextMenu.file.is_dir });
+                  }
+                }}
+                className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+              >
+                Copy
+              </button>
+            </>
+          )}
+          {clipboard && (
+            <>
+              <div className="border-t border-zinc-700 my-1" />
+              <button
+                onClick={handlePaste}
+                className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+              >
+                Paste "{clipboard.name}"
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Drag-over overlay */}
       {dragOverWindow && (
