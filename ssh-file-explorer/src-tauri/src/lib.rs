@@ -861,6 +861,15 @@ async fn download_directory(
             total += size;
             files.push(rel_path);
         }
+
+        if files.is_empty() {
+            let check = format!("ls {} 2>&1", shell_escape(&remote_path));
+            let check_output = exec_ssh(session, &check).await.unwrap_or_default();
+            if check_output.contains("Permission denied") {
+                return Err("Permission denied".to_string());
+            }
+        }
+
         (files, total)
     };
 
@@ -1045,7 +1054,19 @@ async fn start_virtual_drag(
         }
 
         if entries.is_empty() {
-            return Err("Directory is empty or not accessible".to_string());
+            return Err("Permission denied".to_string());
+        }
+
+        let has_files = entries.iter().any(|e| !e.is_dir);
+        let has_children = entries.len() > 1;
+        if !has_files && !has_children {
+            let s = state.lock().await;
+            let session = s.session.as_ref().ok_or("Not connected")?;
+            let check = format!("ls {} 2>&1", shell_escape(&remote_path));
+            let check_output = exec_ssh(session, &check).await.unwrap_or_default();
+            if check_output.contains("Permission denied") {
+                return Err("Permission denied".to_string());
+            }
         }
 
         (entries, total)
