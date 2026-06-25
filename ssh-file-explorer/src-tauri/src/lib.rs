@@ -371,7 +371,7 @@ async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password:
     use tokio::io::AsyncReadExt;
     let mut output = Vec::new();
     let mut buf = vec![0u8; 65536];
-    let read_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let read_result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             match stream.read(&mut buf).await {
                 Ok(0) => break,
@@ -397,12 +397,24 @@ async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password:
 
     let mut exit_code = 0;
     let filtered: String = text.lines()
-        .filter(|line| {
+        .filter_map(|line| {
             if let Some(code) = line.strip_prefix("SUDO_EXIT:") {
                 exit_code = code.trim().parse::<i32>().unwrap_or(1);
-                return false;
+                return None;
             }
-            !line.contains("[sudo] password for")
+            if let Some(idx) = line.find("[sudo] password for") {
+                let after = &line[idx..];
+                if let Some(colon_pos) = after.find(": ") {
+                    let data_start = idx + colon_pos + 2;
+                    let remaining = &line[data_start..];
+                    if remaining.trim().is_empty() {
+                        return None;
+                    }
+                    return Some(remaining.to_string());
+                }
+                return None;
+            }
+            Some(line.to_string())
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -452,8 +464,7 @@ async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Ve
     let session = s.session.as_ref().ok_or("Not connected")?;
 
     let cmd = format!(
-        "LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/* 2>/dev/null; LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/.[!.]* 2>/dev/null",
-        shell_escape(&path),
+        "LC_ALL=C find {} -maxdepth 1 -mindepth 1 -exec stat -c '%n|%F|%s|%Y|%a' {{}} + 2>/dev/null; true",
         shell_escape(&path)
     );
 
@@ -512,8 +523,7 @@ async fn sudo_list_directory(path: String, sudo_password: String, state: State<'
     let session = s.session.as_ref().ok_or("Not connected")?;
 
     let cmd = format!(
-        "LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/* 2>/dev/null; LC_ALL=C stat -c '%n|%F|%s|%Y|%a' {}/.[!.]* 2>/dev/null",
-        shell_escape(&path),
+        "LC_ALL=C find {} -maxdepth 1 -mindepth 1 -exec stat -c '%n|%F|%s|%Y|%a' {{}} + 2>/dev/null; true",
         shell_escape(&path)
     );
 
@@ -716,6 +726,37 @@ async fn search_files(query: String, search_path: String, state: State<'_, SshSe
         escaped_query
     );
     let output = exec_ssh(session, &cmd).await?;
+    let mut results = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (dtype, path) = match line.split_once('|') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        results.push(SearchResult {
+            path: path.to_string(),
+            name,
+            is_dir: dtype == "d",
+        });
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+async fn sudo_search_files(query: String, search_path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<Vec<SearchResult>, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let escaped_query = query.replace("'", "'\\''");
+    let cmd = format!(
+        "find {} -maxdepth 1 -iname '*{}*' -not -name '.*' -printf '%y|%p\\n' 2>/dev/null | head -50; true",
+        shell_escape(&search_path),
+        escaped_query
+    );
+    let output = sudo_exec_ssh(session, &sudo_password, &cmd).await?;
     let mut results = Vec::new();
     for line in output.lines() {
         let line = line.trim();
@@ -1513,6 +1554,7 @@ pub fn run() {
             sudo_create_directory,
             sudo_delete_file,
             search_files,
+            sudo_search_files,
             download_file,
             download_directory,
             start_virtual_drag,

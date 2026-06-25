@@ -179,7 +179,16 @@ function App() {
     if (!connected) return;
     const interval = setInterval(async () => {
       try {
-        const entries: FileEntry[] = await invoke("list_directory", { path: currentPath });
+        let entries: FileEntry[];
+        try {
+          entries = await invoke("list_directory", { path: currentPath });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            entries = await invoke("sudo_list_directory", { path: currentPath, sudoPassword });
+          } else {
+            return;
+          }
+        }
         entries.sort((a, b) => {
           if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
           return a.name.localeCompare(b.name);
@@ -188,7 +197,7 @@ function App() {
       } catch {}
     }, 20000);
     return () => clearInterval(interval);
-  }, [connected, currentPath]);
+  }, [connected, currentPath, sudoPassword]);
 
   useEffect(() => {
     if (!connected) return;
@@ -328,9 +337,7 @@ function App() {
                 setTransfers(prev => prev.filter(t => t.id !== transferId));
               }
             }
-            const entries: FileEntry[] = await invoke("list_directory", { path: currentPath });
-            entries.sort((a, b) => { if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1; return a.name.localeCompare(b.name); });
-            setFiles(entries);
+            await listFiles(currentPath);
           })();
         }
       }
@@ -698,10 +705,13 @@ function App() {
           }
         }
         if (!searchTerm) searchTerm = "*";
-        const results: { path: string; name: string; is_dir: boolean }[] = await invoke("search_files", {
-          query: searchTerm,
-          searchPath,
-        });
+        let results: { path: string; name: string; is_dir: boolean }[] = await invoke("search_files", { query: searchTerm, searchPath });
+        if (results.length === 0 && sudoPassword) {
+          try {
+            const sudoResults: { path: string; name: string; is_dir: boolean }[] = await invoke("sudo_search_files", { query: searchTerm, searchPath, sudoPassword });
+            if (sudoResults.length > 0) results = sudoResults;
+          } catch {}
+        }
         setSearchResults(results);
         setSearchSelectedIndex(-1);
       } catch (e) {
