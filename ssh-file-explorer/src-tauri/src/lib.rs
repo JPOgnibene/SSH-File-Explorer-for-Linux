@@ -420,9 +420,30 @@ async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password:
 async fn check_writable(path: String, state: State<'_, SshSession>) -> Result<bool, String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let cmd = format!("test -w {} && echo 'y' || echo 'n'", shell_escape(&path));
+    let probe = format!("{}/.sftp_write_probe", path.trim_end_matches('/'));
+    let cmd = format!(
+        "touch {} 2>/dev/null && rm -f {} && echo 'y' || echo 'n'",
+        shell_escape(&probe),
+        shell_escape(&probe)
+    );
     let output = exec_ssh(session, &cmd).await?;
-    Ok(output.trim() == "y")
+    Ok(output.trim().ends_with("y"))
+}
+
+#[tauri::command]
+async fn check_sudo_writable(path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<bool, String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let probe = format!("{}/.sftp_sudo_probe", path.trim_end_matches('/'));
+    let escaped_pw = sudo_password.replace("'", "'\\''");
+    let cmd = format!(
+        "printf '%s\\n' '{}' | sudo -S sh -c 'touch {} && rm -f {}' 2>/dev/null && echo 'y' || echo 'n'",
+        escaped_pw,
+        shell_escape(&probe),
+        shell_escape(&probe)
+    );
+    let output = exec_ssh(session, &cmd).await?;
+    Ok(output.trim().ends_with("y"))
 }
 
 #[tauri::command]
@@ -1478,6 +1499,7 @@ pub fn run() {
             ssh_connect_key,
             ssh_disconnect,
             check_writable,
+            check_sudo_writable,
             list_directory,
             sudo_list_directory,
             read_file,

@@ -124,7 +124,8 @@ function App() {
 
   const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
 
-  const [dirWritable, setDirWritable] = useState(true);
+  const [dirWritable, setDirWritable] = useState(false);
+  const [dirSudoWritable, setDirSudoWritable] = useState(false);
   const [fileWritable, setFileWritable] = useState(true);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -294,21 +295,31 @@ function App() {
               const isDir: boolean = await invoke("is_local_directory", { path: localPath });
               setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
               try {
-                try {
+                if (!dirWritable && sudoPassword && dirSudoWritable) {
                   if (isDir) {
-                    await invoke("upload_directory", { transferId, localPath, remotePath });
+                    await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
                   } else {
-                    await invoke("upload_file", { transferId, localPath, remotePath });
+                    await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
                   }
-                } catch (e) {
-                  if (isPermissionError(e) && sudoPassword) {
+                } else if (!dirWritable) {
+                  throw new Error("Permission denied");
+                } else {
+                  try {
                     if (isDir) {
-                      await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+                      await invoke("upload_directory", { transferId, localPath, remotePath });
                     } else {
-                      await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+                      await invoke("upload_file", { transferId, localPath, remotePath });
                     }
-                  } else {
-                    throw e;
+                  } catch (e) {
+                    if (isPermissionError(e) && sudoPassword) {
+                      if (isDir) {
+                        await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+                      } else {
+                        await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+                      }
+                    } else {
+                      throw e;
+                    }
                   }
                 }
               } catch (e) {
@@ -325,7 +336,7 @@ function App() {
       }
     }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
     return () => { cancelled = true; unlisten?.(); };
-  }, [connected, currentPath]);
+  }, [connected, currentPath, dirWritable, dirSudoWritable, sudoPassword]);
 
 
   useEffect(() => {
@@ -401,8 +412,18 @@ function App() {
       });
       setFiles(entries);
       setCurrentPath(path);
-      const writable: boolean = await invoke("check_writable", { path });
+      let writable = false;
+      try {
+        writable = await invoke("check_writable", { path }) as boolean;
+      } catch {}
       setDirWritable(writable);
+      let sudoWrite = false;
+      if (!writable && sudoPassword) {
+        try {
+          sudoWrite = await invoke("check_sudo_writable", { path, sudoPassword }) as boolean;
+        } catch {}
+      }
+      setDirSudoWritable(sudoWrite);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -787,6 +808,10 @@ function App() {
   };
 
   const handleUpload = async () => {
+    if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
+      setError("Permission denied: you do not have write access to this directory");
+      return;
+    }
     try {
       const selected = await open({ multiple: true, directory: false });
       if (!selected) return;
@@ -797,13 +822,19 @@ function App() {
         const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName, bytesTransferred: 0, totalBytes: 0 }]);
         try {
-          try {
-            await invoke("upload_file", { transferId, localPath, remotePath });
-          } catch (e) {
-            if (isPermissionError(e) && sudoPassword) {
-              await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
-            } else {
-              throw e;
+          if (!dirWritable && sudoPassword && dirSudoWritable) {
+            await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+          } else if (!dirWritable) {
+            throw new Error("Permission denied");
+          } else {
+            try {
+              await invoke("upload_file", { transferId, localPath, remotePath });
+            } catch (e) {
+              if (isPermissionError(e) && sudoPassword) {
+                await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
+              } else {
+                throw e;
+              }
             }
           }
         } catch (e) {
@@ -819,6 +850,10 @@ function App() {
   };
 
   const handleUploadDirectory = async () => {
+    if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
+      setError("Permission denied: you do not have write access to this directory");
+      return;
+    }
     try {
       const selected = await open({ multiple: false, directory: true });
       if (!selected) return;
@@ -828,13 +863,19 @@ function App() {
       const transferId = `ul-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       setTransfers(prev => [...prev, { id: transferId, type: 'upload', fileName: dirName, bytesTransferred: 0, totalBytes: 0 }]);
       try {
-        try {
-          await invoke("upload_directory", { transferId, localPath, remotePath });
-        } catch (e) {
-          if (isPermissionError(e) && sudoPassword) {
-            await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
-          } else {
-            throw e;
+        if (!dirWritable && sudoPassword && dirSudoWritable) {
+          await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+        } else if (!dirWritable) {
+          throw new Error("Permission denied");
+        } else {
+          try {
+            await invoke("upload_directory", { transferId, localPath, remotePath });
+          } catch (e) {
+            if (isPermissionError(e) && sudoPassword) {
+              await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
+            } else {
+              throw e;
+            }
           }
         }
       } catch (e) {
