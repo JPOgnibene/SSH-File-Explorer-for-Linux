@@ -108,6 +108,10 @@ function App() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
 
+  const navHistoryRef = useRef<string[]>(["/"]);
+  const navIndexRef = useRef(0);
+  const navSkipPushRef = useRef(false);
+
   const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([]);
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [saveLabel, setSaveLabel] = useState("");
@@ -164,6 +168,8 @@ function App() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [connected]);
+
+  const listFilesRef = useRef<(path: string) => Promise<void>>(null as unknown as (path: string) => Promise<void>);
 
   const loadSshKeys = async () => {
     try {
@@ -423,6 +429,14 @@ function App() {
       });
       setFiles(entries);
       setCurrentPath(path);
+      if (navSkipPushRef.current) {
+        navSkipPushRef.current = false;
+      } else {
+        const hist = navHistoryRef.current;
+        const idx = navIndexRef.current;
+        navHistoryRef.current = [...hist.slice(0, idx + 1), path];
+        navIndexRef.current = navHistoryRef.current.length - 1;
+      }
       let writable = false;
       try {
         writable = await invoke("check_writable", { path }) as boolean;
@@ -441,6 +455,30 @@ function App() {
       setLoading(false);
     }
   }, [sudoPassword]);
+
+  listFilesRef.current = listFiles;
+
+  useEffect(() => {
+    if (!connected) return;
+    const handleMouseButton = (e: MouseEvent) => {
+      if (e.button === 3 || e.button === 4) {
+        e.preventDefault();
+        const hist = navHistoryRef.current;
+        const idx = navIndexRef.current;
+        if (e.button === 3 && idx > 0) {
+          navIndexRef.current = idx - 1;
+          navSkipPushRef.current = true;
+          listFilesRef.current?.(hist[idx - 1]);
+        } else if (e.button === 4 && idx < hist.length - 1) {
+          navIndexRef.current = idx + 1;
+          navSkipPushRef.current = true;
+          listFilesRef.current?.(hist[idx + 1]);
+        }
+      }
+    };
+    window.addEventListener("mouseup", handleMouseButton);
+    return () => window.removeEventListener("mouseup", handleMouseButton);
+  }, [connected]);
 
   const doConnect = async (h: string, p: number, u: string, pw: string) => {
     setConnecting(true);
