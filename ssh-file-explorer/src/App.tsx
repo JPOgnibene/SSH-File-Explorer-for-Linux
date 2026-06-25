@@ -297,6 +297,10 @@ function App() {
         const paths: string[] = (event.payload as { paths?: string[] }).paths || [];
         if (paths.length > 0) {
           (async () => {
+            if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
+              setError("Permission denied: you do not have write access to this directory");
+              return;
+            }
             for (const localPath of paths) {
               const fileName = localPath.replace(/\\/g, "/").split("/").pop() || "file";
               const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
