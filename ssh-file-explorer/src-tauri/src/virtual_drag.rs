@@ -13,6 +13,7 @@ use windows::Win32::System::Memory::*;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{IDataObjectAsyncCapability, IDataObjectAsyncCapability_Impl};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
 
 use serde::Serialize;
 
@@ -121,7 +122,10 @@ struct FileDescriptorW {
 // We still use GetAsyncKeyState as a safety measure since it works on any thread.
 
 #[implement(IDropSource)]
-struct SimpleDropSource;
+struct SimpleDropSource {
+    hwnd: HWND,
+    was_outside: Arc<AtomicBool>,
+}
 
 #[allow(non_snake_case)]
 impl IDropSource_Impl for SimpleDropSource {
@@ -138,10 +142,25 @@ impl IDropSource_Impl for SimpleDropSource {
         let lbutton_down = unsafe { GetAsyncKeyState(VK_LBUTTON) } < 0;
 
         if !lbutton_down {
-            DRAGDROP_S_DROP
-        } else {
-            S_OK
+            return DRAGDROP_S_DROP;
         }
+
+        let mut cursor_pos = POINT::default();
+        let mut window_rect = RECT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut cursor_pos);
+            let _ = GetWindowRect(self.hwnd, &mut window_rect);
+        }
+        let inside = cursor_pos.x >= window_rect.left && cursor_pos.x <= window_rect.right
+            && cursor_pos.y >= window_rect.top && cursor_pos.y <= window_rect.bottom;
+
+        if !inside {
+            self.was_outside.store(true, Ordering::Relaxed);
+        } else if self.was_outside.load(Ordering::Relaxed) {
+            return DRAGDROP_S_CANCEL;
+        }
+
+        S_OK
     }
 
     fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> HRESULT {
@@ -806,7 +825,8 @@ pub fn start_drag(
     display_name: String,
     app_handle: AppHandle,
     transfer_id: String,
-) -> std::result::Result<(), String> {
+    hwnd: HWND,
+) -> std::result::Result<String, String> {
     let cf_descriptor =
         unsafe { RegisterClipboardFormatW(w!("FileGroupDescriptorW")) as u16 };
     let cf_contents =
@@ -833,22 +853,29 @@ pub fn start_drag(
     }
     .into();
 
-    let drop_source: IDropSource = SimpleDropSource.into();
+    let was_outside = Arc::new(AtomicBool::new(false));
+    let drop_source: IDropSource = SimpleDropSource {
+        hwnd,
+        was_outside: was_outside.clone(),
+    }.into();
 
-    let effect;
+    let (effect, hr);
     unsafe {
         let mut eff = DROPEFFECT::default();
-        let _ = DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut eff);
+        hr = DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut eff);
         effect = eff;
     }
 
-    // With IDataObjectAsyncCapability, DoDragDrop returns immediately after
-    // the drop. If the drag was cancelled (no drop target accepted it),
-    // signal completion now. Otherwise the download thread signals when done.
+    if hr == DRAGDROP_S_CANCEL && was_outside.load(Ordering::Relaxed) {
+        DRAG_PROGRESS_BYTES.store(0, Ordering::Relaxed);
+        DRAG_PROGRESS_TOTAL.store(u64::MAX, Ordering::Relaxed);
+        return Ok("reentry".to_string());
+    }
+
     if effect == DROPEFFECT(0) {
         DRAG_PROGRESS_BYTES.store(0, Ordering::Relaxed);
         DRAG_PROGRESS_TOTAL.store(u64::MAX, Ordering::Relaxed);
     }
 
-    Ok(())
+    Ok("done".to_string())
 }

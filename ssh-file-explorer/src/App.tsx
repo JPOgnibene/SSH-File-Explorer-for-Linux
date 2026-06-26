@@ -134,6 +134,10 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
 
+  const internalDragRef = useRef<FileEntry[] | null>(null);
+  const [isDraggingInternal, setIsDraggingInternal] = useState(false);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
   const [dirWritable, setDirWritable] = useState(false);
   const [dirSudoWritable, setDirSudoWritable] = useState(false);
   const [fileWritable, setFileWritable] = useState(true);
@@ -489,6 +493,71 @@ function App() {
     return () => window.removeEventListener("mouseup", handleMouseButton);
   }, [connected]);
 
+  const oleDragActiveRef = useRef(false);
+
+  useEffect(() => {
+    if (!isDraggingInternal) return;
+    document.body.style.cursor = 'grabbing';
+
+    const startOleDrag = async () => {
+      const targets = internalDragRef.current;
+      if (!targets || targets.length === 0 || oleDragActiveRef.current) return;
+      oleDragActiveRef.current = true;
+      setDropTarget(null);
+
+      let result: string;
+      if (targets.length > 1) {
+        result = await handleMultiDragOut(targets);
+      } else {
+        result = await handleDragOut(targets[0]);
+      }
+      oleDragActiveRef.current = false;
+
+      if (result === "reentry") {
+        document.body.style.cursor = 'grabbing';
+        return;
+      }
+      document.body.style.cursor = '';
+      setIsDraggingInternal(false);
+      setDropTarget(null);
+      internalDragRef.current = null;
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!internalDragRef.current || oleDragActiveRef.current) return;
+      const atEdge = e.clientX <= 0 || e.clientY <= 0 ||
+          e.clientX >= window.innerWidth - 1 || e.clientY >= window.innerHeight - 1;
+      if (atEdge) {
+        startOleDrag();
+        return;
+      }
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const row = el?.closest('tr[data-folder]');
+      setDropTarget(row ? row.getAttribute('data-folder') : null);
+    };
+
+    const handleMouseUp = () => {
+      if (oleDragActiveRef.current) return;
+      const targets = internalDragRef.current;
+      const dest = dropTarget;
+      document.body.style.cursor = '';
+      setIsDraggingInternal(false);
+      setDropTarget(null);
+      internalDragRef.current = null;
+      if (dest && targets && targets.length > 0) {
+        handleInternalCopy(targets, dest);
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+    };
+  }, [isDraggingInternal, dropTarget]);
+
   const doConnect = async (h: string, p: number, u: string, pw: string) => {
     setConnecting(true);
     setError("");
@@ -738,6 +807,34 @@ function App() {
     }
   };
 
+  const handleInternalCopy = async (targets: FileEntry[], destFolder: string) => {
+    let destDir: string;
+    if (destFolder === "..") {
+      destDir = currentPath.substring(0, currentPath.lastIndexOf("/")) || "/";
+    } else {
+      destDir = currentPath === "/" ? `/${destFolder}` : `${currentPath}/${destFolder}`;
+    }
+    for (const file of targets) {
+      if (file.is_dir && file.name === destFolder) continue;
+      const src = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+      const dest = destDir === "/" ? `/${file.name}` : `${destDir}/${file.name}`;
+      try {
+        try {
+          await invoke("copy_path", { src, dest, isDir: file.is_dir });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            await invoke("sudo_copy_path", { src, dest, isDir: file.is_dir, sudoPassword });
+          } else {
+            throw e;
+          }
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    }
+    await listFiles(currentPath);
+  };
+
   const navigateUp = () => {
     if (currentPath === "/") return;
     const parent = currentPath.substring(0, currentPath.lastIndexOf("/")) || "/";
@@ -890,30 +987,33 @@ function App() {
     }
   };
 
-  const handleDragOut = async (file: FileEntry) => {
+  const handleDragOut = async (file: FileEntry): Promise<string> => {
     const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: file.size }]);
     setActiveDrag(file.name);
     document.body.style.cursor = 'grabbing';
     try {
-      await invoke("start_virtual_drag", {
+      const result: string = await invoke("start_virtual_drag", {
         transferId,
         remotePath,
         fileName: file.name,
         fileSize: file.size,
         isDir: file.is_dir,
       });
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+      return result;
     } catch (e) {
       if (!String(e).includes("Transfer cancelled")) setError(String(e));
       setTransfers(prev => prev.filter(t => t.id !== transferId));
+      return "error";
     } finally {
       setActiveDrag(null);
       document.body.style.cursor = '';
     }
   };
 
-  const handleMultiDragOut = async (targets: FileEntry[]) => {
+  const handleMultiDragOut = async (targets: FileEntry[]): Promise<string> => {
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const totalSize = targets.reduce((sum, f) => sum + f.size, 0);
     const label = `${targets.length} items`;
@@ -927,10 +1027,13 @@ function App() {
         size: f.size,
         is_dir: f.is_dir,
       }));
-      await invoke("start_multi_drag", { transferId, files: filesArg });
+      const result: string = await invoke("start_multi_drag", { transferId, files: filesArg });
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+      return result;
     } catch (e) {
       if (!String(e).includes("Transfer cancelled")) setError(String(e));
       setTransfers(prev => prev.filter(t => t.id !== transferId));
+      return "error";
     } finally {
       setActiveDrag(null);
       document.body.style.cursor = '';
@@ -1545,8 +1648,9 @@ function App() {
             <tbody>
               {currentPath !== "/" && (
                 <tr
+                  data-folder=".."
                   onClick={navigateUp}
-                  className="hover:bg-zinc-900/50 cursor-pointer transition group"
+                  className={`cursor-pointer transition group ${dropTarget === ".." ? "bg-blue-500/30 ring-1 ring-blue-500/50" : "hover:bg-zinc-900/50"}`}
                 >
                   <td className="py-2 px-4 flex items-center gap-2.5">
                     <svg className="w-5 h-5 text-zinc-500" fill="currentColor" viewBox="0 0 20 20">
@@ -1568,6 +1672,7 @@ function App() {
                 files.map((file) => (
                   <tr
                     key={file.name}
+                    {...(file.is_dir ? { "data-folder": file.name } : {})}
                     onClick={(e) => {
                       if (e.ctrlKey || e.metaKey) {
                         e.preventDefault();
@@ -1598,11 +1703,13 @@ function App() {
                       setContextMenu({ x: e.clientX, y: e.clientY, file });
                     }}
                     className={`border-b border-zinc-800/30 transition ${
-                      selectedFiles.has(file.name)
-                        ? "bg-blue-500/20 hover:bg-blue-500/30"
-                        : file.is_dir
-                          ? "hover:bg-zinc-900/50 cursor-pointer"
-                          : "hover:bg-zinc-900/30 cursor-pointer"
+                      dropTarget === file.name
+                        ? "bg-blue-500/30 ring-1 ring-blue-500/50"
+                        : selectedFiles.has(file.name)
+                          ? "bg-blue-500/20 hover:bg-blue-500/30"
+                          : file.is_dir
+                            ? "hover:bg-zinc-900/50 cursor-pointer"
+                            : "hover:bg-zinc-900/30 cursor-pointer"
                     } group ${
                       editingFile &&
                       editingFile === (currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`)
@@ -1633,14 +1740,14 @@ function App() {
                           onMouseDown={(e) => {
                             e.stopPropagation();
                             e.preventDefault();
-                            if (selectedFiles.size > 1 && selectedFiles.has(file.name)) {
-                              handleMultiDragOut(files.filter(f => selectedFiles.has(f.name)));
-                            } else {
-                              handleDragOut(file);
-                            }
+                            const targets = selectedFiles.size > 1 && selectedFiles.has(file.name)
+                              ? files.filter(f => selectedFiles.has(f.name))
+                              : [file];
+                            internalDragRef.current = targets;
+                            setIsDraggingInternal(true);
                           }}
                           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-grab"
-                          title={selectedFiles.size > 1 && selectedFiles.has(file.name) ? `Drag ${selectedFiles.size} items to a folder` : `Drag ${file.name} to a folder`}
+                          title={selectedFiles.size > 1 && selectedFiles.has(file.name) ? `Drag ${selectedFiles.size} items` : `Drag ${file.name}`}
                         >
                           <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />

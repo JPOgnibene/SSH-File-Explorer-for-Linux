@@ -4,6 +4,11 @@ use tokio::sync::Mutex;
 use russh::*;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(target_os = "windows")]
+#[allow(deprecated)]
+use raw_window_handle::HasRawWindowHandle;
+#[cfg(target_os = "windows")]
+use raw_window_handle::RawWindowHandle;
 
 static CANCELLED_TRANSFERS: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
@@ -1030,7 +1035,7 @@ async fn start_virtual_drag(
     file_size: u64,
     is_dir: bool,
     state: State<'_, SshSession>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let rt_handle = tokio::runtime::Handle::current();
     let ssh_state = state.inner().clone();
 
@@ -1114,6 +1119,7 @@ async fn start_virtual_drag(
     let display_name = file_name.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let app_for_drag = app.clone();
+    let hwnd = get_app_hwnd(&app)?;
 
     app.run_on_main_thread(move || {
         let result = virtual_drag::start_drag(
@@ -1124,11 +1130,25 @@ async fn start_virtual_drag(
             display_name,
             app_for_drag,
             transfer_id,
+            hwnd,
         );
         let _ = tx.send(result);
     }).map_err(|e| format!("Failed to schedule drag on main thread: {}", e))?;
 
     rx.await.map_err(|_| "Drag thread error".to_string())?
+}
+
+#[cfg(target_os = "windows")]
+fn get_app_hwnd(app: &AppHandle) -> Result<windows::Win32::Foundation::HWND, String> {
+    let window = app.get_webview_window("main").ok_or("No main window")?;
+    #[allow(deprecated)]
+    let handle = window.raw_window_handle().map_err(|e| format!("{}", e))?;
+    match handle {
+        RawWindowHandle::Win32(h) => {
+            Ok(windows::Win32::Foundation::HWND(isize::from(h.hwnd)))
+        }
+        _ => Err("Not a Win32 window".to_string()),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1145,8 +1165,8 @@ async fn start_multi_drag(
     transfer_id: String,
     files: Vec<DragFileInfo>,
     state: State<'_, SshSession>,
-) -> Result<(), String> {
-    if files.is_empty() { return Ok(()); }
+) -> Result<String, String> {
+    if files.is_empty() { return Ok("done".to_string()); }
 
     let rt_handle = tokio::runtime::Handle::current();
     let ssh_state = state.inner().clone();
@@ -1210,6 +1230,7 @@ async fn start_multi_drag(
     let display_name = if files.len() == 1 { files[0].name.clone() } else { format!("{} items", files.len()) };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let app_for_drag = app.clone();
+    let hwnd = get_app_hwnd(&app)?;
 
     app.run_on_main_thread(move || {
         let result = virtual_drag::start_drag(
@@ -1220,6 +1241,7 @@ async fn start_multi_drag(
             display_name,
             app_for_drag,
             transfer_id,
+            hwnd,
         );
         let _ = tx.send(result);
     }).map_err(|e| format!("Failed to schedule drag on main thread: {}", e))?;
