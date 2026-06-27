@@ -44,7 +44,7 @@ interface SshKeyInfo {
 
 interface Transfer {
   id: string;
-  type: 'upload' | 'download';
+  type: 'upload' | 'download' | 'copy';
   fileName: string;
   bytesTransferred: number;
   totalBytes: number;
@@ -231,7 +231,7 @@ function App() {
           updated[idx] = { ...updated[idx], bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes };
           return updated;
         }
-        return [...prev, { id: p.id, type: p.transfer_type as 'upload' | 'download', fileName: p.file_name, bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes }];
+        return [...prev, { id: p.id, type: p.transfer_type as 'upload' | 'download' | 'copy', fileName: p.file_name, bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes }];
       });
     }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
     return () => { cancelled = true; unlisten?.(); };
@@ -791,12 +791,14 @@ function App() {
     if (!clipboard) return;
     const dest = currentPath === "/" ? `/${clipboard.name}` : `${currentPath}/${clipboard.name}`;
     if (clipboard.path === dest) return;
+    const transferId = `copy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setTransfers(prev => [...prev, { id: transferId, type: 'copy', fileName: clipboard.name, bytesTransferred: 0, totalBytes: 0 }]);
     try {
       try {
-        await invoke("copy_path", { src: clipboard.path, dest, isDir: clipboard.is_dir });
+        await invoke("copy_path", { transferId, src: clipboard.path, dest, isDir: clipboard.is_dir });
       } catch (e) {
         if (isPermissionError(e) && sudoPassword) {
-          await invoke("sudo_copy_path", { src: clipboard.path, dest, isDir: clipboard.is_dir, sudoPassword });
+          await invoke("sudo_copy_path", { transferId, src: clipboard.path, dest, isDir: clipboard.is_dir, sudoPassword });
         } else {
           throw e;
         }
@@ -804,6 +806,8 @@ function App() {
       await listFiles(currentPath);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
     }
   };
 
@@ -818,18 +822,22 @@ function App() {
       if (file.is_dir && file.name === destFolder) continue;
       const src = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
       const dest = destDir === "/" ? `/${file.name}` : `${destDir}/${file.name}`;
+      const transferId = `copy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'copy', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
       try {
         try {
-          await invoke("copy_path", { src, dest, isDir: file.is_dir });
+          await invoke("copy_path", { transferId, src, dest, isDir: file.is_dir });
         } catch (e) {
           if (isPermissionError(e) && sudoPassword) {
-            await invoke("sudo_copy_path", { src, dest, isDir: file.is_dir, sudoPassword });
+            await invoke("sudo_copy_path", { transferId, src, dest, isDir: file.is_dir, sudoPassword });
           } else {
             throw e;
           }
         }
       } catch (e) {
         setError(String(e));
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
       }
     }
     await listFiles(currentPath);
@@ -1845,9 +1853,11 @@ function App() {
             const pct = transfer.totalBytes > 0 ? Math.round(transfer.bytesTransferred / transfer.totalBytes * 100) : 0;
             return (
               <div key={transfer.id} className="flex items-center gap-3 px-4 py-1.5">
-                <svg className={`w-3.5 h-3.5 shrink-0 ${transfer.type === 'upload' ? 'text-emerald-400' : 'text-blue-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className={`w-3.5 h-3.5 shrink-0 ${transfer.type === 'upload' ? 'text-emerald-400' : transfer.type === 'copy' ? 'text-amber-400' : 'text-blue-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   {transfer.type === 'upload' ? (
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  ) : transfer.type === 'copy' ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
                   ) : (
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                   )}
@@ -1867,7 +1877,7 @@ function App() {
                 <span className="text-xs text-zinc-300 truncate w-36">{transfer.fileName}</span>
                 <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                   <div
-                    className={`h-full rounded-full transition-all duration-150 ${transfer.type === 'upload' ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                    className={`h-full rounded-full transition-all duration-150 ${transfer.type === 'upload' ? 'bg-emerald-500' : transfer.type === 'copy' ? 'bg-amber-500' : 'bg-blue-500'}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>

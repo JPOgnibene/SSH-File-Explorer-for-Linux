@@ -714,31 +714,138 @@ async fn sudo_delete_file(path: String, is_dir: bool, sudo_password: String, sta
 }
 
 #[tauri::command]
-async fn copy_path(src: String, dest: String, is_dir: bool, state: State<'_, SshSession>) -> Result<(), String> {
+async fn copy_path(
+    app: AppHandle,
+    transfer_id: String,
+    src: String,
+    dest: String,
+    is_dir: bool,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let cmd = if is_dir {
-        format!("cp -r {} {} 2>&1", shell_escape(&src), shell_escape(&dest))
+    let file_name = src.rsplit('/').next().unwrap_or(&src).to_string();
+
+    let size_cmd = if is_dir {
+        format!("du -sb {} 2>/dev/null | cut -f1", shell_escape(&src))
     } else {
-        format!("cp {} {} 2>&1", shell_escape(&src), shell_escape(&dest))
+        format!("stat -c '%s' {} 2>/dev/null", shell_escape(&src))
     };
-    let output = exec_ssh(session, &cmd).await?;
-    if !output.trim().is_empty() {
-        return Err(output.trim().to_string());
+    let total_bytes: u64 = exec_ssh(session, &size_cmd).await
+        .unwrap_or_default().trim().parse().unwrap_or(0);
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        id: transfer_id.clone(), transfer_type: "copy".into(),
+        file_name: file_name.clone(), bytes_transferred: 0, total_bytes,
+    });
+
+    let marker = format!("/tmp/.cp_done_{}", transfer_id);
+    let cp_cmd = if is_dir {
+        format!("(cp -r {} {} ; echo $? > {}) >/dev/null 2>&1 &", shell_escape(&src), shell_escape(&dest), shell_escape(&marker))
+    } else {
+        format!("(cp {} {} ; echo $? > {}) >/dev/null 2>&1 &", shell_escape(&src), shell_escape(&dest), shell_escape(&marker))
+    };
+    exec_ssh(session, &cp_cmd).await?;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let check = exec_ssh(session, &format!("cat {} 2>/dev/null", shell_escape(&marker))).await.unwrap_or_default();
+        if !check.trim().is_empty() {
+            let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&marker))).await;
+            let exit_code: i32 = check.trim().parse().unwrap_or(-1);
+            if exit_code != 0 {
+                return Err("Permission denied".to_string());
+            }
+            break;
+        }
+        let poll_cmd = if is_dir {
+            format!("du -sb {} 2>/dev/null | cut -f1", shell_escape(&dest))
+        } else {
+            format!("stat -c '%s' {} 2>/dev/null", shell_escape(&dest))
+        };
+        if let Ok(out) = exec_ssh(session, &poll_cmd).await {
+            let current: u64 = out.trim().parse().unwrap_or(0);
+            let _ = app.emit("transfer-progress", TransferProgress {
+                id: transfer_id.clone(), transfer_type: "copy".into(),
+                file_name: file_name.clone(), bytes_transferred: current, total_bytes,
+            });
+        }
     }
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        id: transfer_id.clone(), transfer_type: "copy".into(),
+        file_name, bytes_transferred: total_bytes, total_bytes,
+    });
     Ok(())
 }
 
 #[tauri::command]
-async fn sudo_copy_path(src: String, dest: String, is_dir: bool, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
+async fn sudo_copy_path(
+    app: AppHandle,
+    transfer_id: String,
+    src: String,
+    dest: String,
+    is_dir: bool,
+    sudo_password: String,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
-    let cmd = if is_dir {
+    let file_name = src.rsplit('/').next().unwrap_or(&src).to_string();
+
+    let size_cmd = if is_dir {
+        format!("du -sb {}", shell_escape(&src))
+    } else {
+        format!("stat -c '%s' {}", shell_escape(&src))
+    };
+    let size_out = sudo_exec_ssh(session, &sudo_password, &size_cmd).await.unwrap_or_default();
+    let total_bytes: u64 = size_out.split_whitespace().next()
+        .and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        id: transfer_id.clone(), transfer_type: "copy".into(),
+        file_name: file_name.clone(), bytes_transferred: 0, total_bytes,
+    });
+
+    let marker = format!("/tmp/.cp_done_{}", transfer_id);
+    let cp_cmd = if is_dir {
         format!("cp -r {} {}", shell_escape(&src), shell_escape(&dest))
     } else {
         format!("cp {} {}", shell_escape(&src), shell_escape(&dest))
     };
-    sudo_exec_ssh(session, &sudo_password, &cmd).await?;
+    let bg_cmd = format!("({} ; echo $? > {}) >/dev/null 2>&1 &", cp_cmd, shell_escape(&marker));
+    sudo_exec_ssh(session, &sudo_password, &bg_cmd).await?;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let check = exec_ssh(session, &format!("cat {} 2>/dev/null", shell_escape(&marker))).await.unwrap_or_default();
+        if !check.trim().is_empty() {
+            let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&marker))).await;
+            let exit_code: i32 = check.trim().parse().unwrap_or(-1);
+            if exit_code != 0 {
+                return Err("Permission denied".to_string());
+            }
+            break;
+        }
+        let poll_cmd = if is_dir {
+            format!("du -sb {} 2>/dev/null | cut -f1", shell_escape(&dest))
+        } else {
+            format!("stat -c '%s' {} 2>/dev/null", shell_escape(&dest))
+        };
+        if let Ok(out) = exec_ssh(session, &poll_cmd).await {
+            let current: u64 = out.split_whitespace().next()
+                .and_then(|s| s.parse().ok()).unwrap_or(0);
+            let _ = app.emit("transfer-progress", TransferProgress {
+                id: transfer_id.clone(), transfer_type: "copy".into(),
+                file_name: file_name.clone(), bytes_transferred: current, total_bytes,
+            });
+        }
+    }
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        id: transfer_id.clone(), transfer_type: "copy".into(),
+        file_name, bytes_transferred: total_bytes, total_bytes,
+    });
     Ok(())
 }
 
