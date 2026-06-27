@@ -1935,6 +1935,16 @@ function App() {
               </button>
             </>
           )}
+          <div className="border-t border-zinc-700 my-1" />
+          <button
+            onClick={() => {
+              setShowNewFileInput(true);
+              setNewFileName("");
+            }}
+            className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+          >
+            New File/Folder
+          </button>
         </div>
       )}
 
