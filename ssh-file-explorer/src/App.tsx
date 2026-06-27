@@ -1692,8 +1692,11 @@ function App() {
                       } else {
                         setSelectedFiles(new Set());
                         lastClickedRef.current = file.name;
-                        openFile(file);
+                        if (file.is_dir) openFile(file);
                       }
+                    }}
+                    onDoubleClick={() => {
+                      if (!file.is_dir) openFile(file);
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
