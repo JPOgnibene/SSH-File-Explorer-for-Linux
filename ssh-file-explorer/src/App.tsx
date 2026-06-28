@@ -126,10 +126,10 @@ function App() {
   const [showNewFileInput, setShowNewFileInput] = useState(false);
   const [newFileName, setNewFileName] = useState("");
 
-  const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<FileEntry[] | null>(null);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: FileEntry | null } | null>(null);
-  const [clipboard, setClipboard] = useState<{ path: string; name: string; is_dir: boolean } | null>(null);
+  const [clipboard, setClipboard] = useState<{ path: string; name: string; is_dir: boolean }[] | null>(null);
 
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
@@ -760,55 +760,59 @@ function App() {
     }
   };
 
-  const handleDeleteFile = async (file: FileEntry) => {
-    const filePath =
-      currentPath === "/"
-        ? `/${file.name}`
-        : `${currentPath}/${file.name}`;
+  const handleDeleteFile = async (targets: FileEntry[]) => {
     setError("");
-    try {
+    setConfirmDelete(null);
+    for (const file of targets) {
+      const filePath =
+        currentPath === "/"
+          ? `/${file.name}`
+          : `${currentPath}/${file.name}`;
       try {
-        await invoke("delete_file", { path: filePath, isDir: file.is_dir });
-      } catch (e) {
-        if (isPermissionError(e) && sudoPassword) {
-          await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword });
-        } else {
-          throw e;
+        try {
+          await invoke("delete_file", { path: filePath, isDir: file.is_dir });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword });
+          } else {
+            throw e;
+          }
         }
+        if (editingFile === filePath) {
+          closeEditor();
+        }
+      } catch (e) {
+        setError(String(e));
       }
-      setConfirmDelete(null);
-      if (editingFile === filePath) {
-        closeEditor();
-      }
-      await listFiles(currentPath);
-    } catch (e) {
-      setConfirmDelete(null);
-      setError(String(e));
     }
+    setSelectedFiles(new Set());
+    await listFiles(currentPath);
   };
 
   const handlePaste = async () => {
-    if (!clipboard) return;
-    const dest = currentPath === "/" ? `/${clipboard.name}` : `${currentPath}/${clipboard.name}`;
-    if (clipboard.path === dest) return;
-    const transferId = `copy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setTransfers(prev => [...prev, { id: transferId, type: 'copy', fileName: clipboard.name, bytesTransferred: 0, totalBytes: 0 }]);
-    try {
+    if (!clipboard || clipboard.length === 0) return;
+    for (const item of clipboard) {
+      const dest = currentPath === "/" ? `/${item.name}` : `${currentPath}/${item.name}`;
+      if (item.path === dest) continue;
+      const transferId = `copy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'copy', fileName: item.name, bytesTransferred: 0, totalBytes: 0 }]);
       try {
-        await invoke("copy_path", { transferId, src: clipboard.path, dest, isDir: clipboard.is_dir });
-      } catch (e) {
-        if (isPermissionError(e) && sudoPassword) {
-          await invoke("sudo_copy_path", { transferId, src: clipboard.path, dest, isDir: clipboard.is_dir, sudoPassword });
-        } else {
-          throw e;
+        try {
+          await invoke("copy_path", { transferId, src: item.path, dest, isDir: item.is_dir });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            await invoke("sudo_copy_path", { transferId, src: item.path, dest, isDir: item.is_dir, sudoPassword });
+          } else {
+            throw e;
+          }
         }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
       }
-      await listFiles(currentPath);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setTransfers(prev => prev.filter(t => t.id !== transferId));
     }
+    await listFiles(currentPath);
   };
 
   const handleInternalCopy = async (targets: FileEntry[], destFolder: string) => {
@@ -1609,10 +1613,18 @@ function App() {
       {confirmDelete && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-sm w-full mx-4 shadow-2xl">
-            <h3 className="text-white font-medium mb-2">Delete {confirmDelete.is_dir ? "folder" : "file"}?</h3>
+            <h3 className="text-white font-medium mb-2">
+              Delete {confirmDelete.length > 1 ? `${confirmDelete.length} items` : confirmDelete[0].is_dir ? "folder" : "file"}?
+            </h3>
             <p className="text-sm text-zinc-400 mb-4">
-              Are you sure you want to delete <span className="text-zinc-200 font-medium">{confirmDelete.name}</span>?
-              {confirmDelete.is_dir && " This will delete all contents inside it."}
+              {confirmDelete.length > 1 ? (
+                <>Are you sure you want to delete <span className="text-zinc-200 font-medium">{confirmDelete.length} items</span>?</>
+              ) : (
+                <>
+                  Are you sure you want to delete <span className="text-zinc-200 font-medium">{confirmDelete[0].name}</span>?
+                  {confirmDelete[0].is_dir && " This will delete all contents inside it."}
+                </>
+              )}
             </p>
             <div className="flex justify-end gap-2">
               <button
@@ -1783,10 +1795,14 @@ function App() {
                         <div
                           onClick={(e) => {
                             e.stopPropagation();
-                            setConfirmDelete(file);
+                            if (selectedFiles.size > 1 && selectedFiles.has(file.name)) {
+                              setConfirmDelete(files.filter(f => selectedFiles.has(f.name)));
+                            } else {
+                              setConfirmDelete([file]);
+                            }
                           }}
                           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
-                          title={`Delete ${file.name}`}
+                          title={selectedFiles.size > 1 && selectedFiles.has(file.name) ? `Delete ${selectedFiles.size} items` : `Delete ${file.name}`}
                         >
                           <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -1927,13 +1943,23 @@ function App() {
               <button
                 onClick={() => {
                   if (contextMenu.file) {
-                    const path = currentPath === "/" ? `/${contextMenu.file.name}` : `${currentPath}/${contextMenu.file.name}`;
-                    setClipboard({ path, name: contextMenu.file.name, is_dir: contextMenu.file.is_dir });
+                    if (selectedFiles.size > 1 && selectedFiles.has(contextMenu.file.name)) {
+                      setClipboard(files.filter(f => selectedFiles.has(f.name)).map(f => ({
+                        path: currentPath === "/" ? `/${f.name}` : `${currentPath}/${f.name}`,
+                        name: f.name,
+                        is_dir: f.is_dir,
+                      })));
+                    } else {
+                      const path = currentPath === "/" ? `/${contextMenu.file.name}` : `${currentPath}/${contextMenu.file.name}`;
+                      setClipboard([{ path, name: contextMenu.file.name, is_dir: contextMenu.file.is_dir }]);
+                    }
                   }
                 }}
                 className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
               >
-                Copy
+                {selectedFiles.size > 1 && contextMenu.file && selectedFiles.has(contextMenu.file.name)
+                  ? `Copy ${selectedFiles.size} items`
+                  : "Copy"}
               </button>
             </>
           )}
@@ -1944,7 +1970,7 @@ function App() {
                 onClick={handlePaste}
                 className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
               >
-                Paste "{clipboard.name}"
+                Paste {clipboard.length > 1 ? `${clipboard.length} items` : `"${clipboard[0].name}"`}
               </button>
             </>
           )}
