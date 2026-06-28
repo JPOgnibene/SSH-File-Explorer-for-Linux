@@ -1350,26 +1350,7 @@ function App() {
           <span className="text-zinc-300 font-medium">{username}@{host}</span>
         </div>
 
-        {/* Breadcrumb */}
-        <div className="flex-1 flex items-center gap-1 text-sm overflow-x-auto mx-4">
-          <button
-            onClick={() => listFiles("/")}
-            className="text-zinc-400 hover:text-white transition shrink-0 cursor-pointer"
-          >
-            /
-          </button>
-          {pathSegments.map((seg, i) => (
-            <span key={i} className="flex items-center gap-1 shrink-0">
-              <span className="text-zinc-600">/</span>
-              <button
-                onClick={() => navigateToSegment(i)}
-                className="text-zinc-400 hover:text-white transition cursor-pointer"
-              >
-                {seg}
-              </button>
-            </span>
-          ))}
-        </div>
+        <div className="flex-1" />
 
         {/* Action buttons */}
         <div className="relative">
@@ -1604,6 +1585,27 @@ function App() {
           </span>
         </div>
       )}
+
+      {/* Breadcrumb bar */}
+      <div className="flex items-center gap-1 px-4 py-1.5 text-sm bg-zinc-900/30 border-b border-zinc-800 overflow-x-auto">
+        <button
+          onClick={() => listFiles("/")}
+          className="text-zinc-400 hover:text-white transition shrink-0 cursor-pointer"
+        >
+          /
+        </button>
+        {pathSegments.map((seg, i) => (
+          <span key={i} className="flex items-center gap-1 shrink-0">
+            <span className="text-zinc-600">/</span>
+            <button
+              onClick={() => navigateToSegment(i)}
+              className="text-zinc-400 hover:text-white transition cursor-pointer"
+            >
+              {seg}
+            </button>
+          </span>
+        ))}
+      </div>
 
       {/* Delete confirmation modal */}
       {confirmDelete && (
