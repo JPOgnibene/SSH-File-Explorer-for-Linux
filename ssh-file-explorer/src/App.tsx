@@ -316,7 +316,7 @@ function App() {
         if (paths.length > 0) {
           (async () => {
             if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
-              setError("Permission denied: you do not have write access to this directory");
+              setError("Permission Denied: Sudo Required");
               return;
             }
             for (const localPath of paths) {
@@ -333,7 +333,7 @@ function App() {
                     await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
                   }
                 } else if (!dirWritable) {
-                  throw new Error("Permission denied");
+                  throw new Error("Permission Denied: Sudo Required");
                 } else {
                   try {
                     if (isDir) {
@@ -1054,7 +1054,7 @@ function App() {
 
   const handleUpload = async () => {
     if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
-      setError("Permission denied: you do not have write access to this directory");
+      setError("Permission Denied: Sudo Required");
       return;
     }
     try {
@@ -1070,7 +1070,7 @@ function App() {
           if (!dirWritable && sudoPassword && dirSudoWritable) {
             await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
           } else if (!dirWritable) {
-            throw new Error("Permission denied");
+            throw new Error("Permission Denied: Sudo Required");
           } else {
             try {
               await invoke("upload_file", { transferId, localPath, remotePath });
@@ -1096,7 +1096,7 @@ function App() {
 
   const handleUploadDirectory = async () => {
     if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
-      setError("Permission denied: you do not have write access to this directory");
+      setError("Permission Denied: Sudo Required");
       return;
     }
     try {
@@ -1111,7 +1111,7 @@ function App() {
         if (!dirWritable && sudoPassword && dirSudoWritable) {
           await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
         } else if (!dirWritable) {
-          throw new Error("Permission denied");
+          throw new Error("Permission Denied: Sudo Required");
         } else {
           try {
             await invoke("upload_directory", { transferId, localPath, remotePath });

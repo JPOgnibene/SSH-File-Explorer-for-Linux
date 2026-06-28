@@ -387,7 +387,7 @@ async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password:
     }).await;
 
     if read_result.is_err() {
-        return Err("Sudo operation timed out".into());
+        return Err("Permission Denied: Sudo Required".into());
     }
 
     let text = String::from_utf8_lossy(&output).into_owned();
@@ -397,7 +397,7 @@ async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password:
         || lower.contains("incorrect password")
         || lower.contains("authentication failure")
     {
-        return Err("Sudo authentication failed — incorrect password or insufficient privileges".into());
+        return Err("Permission Denied: Sudo Required".into());
     }
 
     let mut exit_code = 0;
@@ -428,7 +428,7 @@ async fn sudo_exec_ssh(session: &russh::client::Handle<ClientHandler>, password:
         return Err(filtered.trim().to_string());
     }
     if exit_code != 0 {
-        return Err("Sudo command failed".into());
+        return Err("Permission Denied: Sudo Required".into());
     }
     Ok(filtered)
 }
@@ -515,7 +515,7 @@ async fn list_directory(path: String, state: State<'_, SshSession>) -> Result<Ve
         let check = format!("ls {} 2>&1", shell_escape(&path));
         let check_output = exec_ssh(session, &check).await.unwrap_or_default();
         if check_output.contains("Permission denied") {
-            return Err("Permission denied".to_string());
+            return Err("Permission Denied: Sudo Required".to_string());
         }
     }
 
@@ -754,7 +754,7 @@ async fn copy_path(
             let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&marker))).await;
             let exit_code: i32 = check.trim().parse().unwrap_or(-1);
             if exit_code != 0 {
-                return Err("Permission denied".to_string());
+                return Err("Permission Denied: Sudo Required".to_string());
             }
             break;
         }
@@ -823,7 +823,7 @@ async fn sudo_copy_path(
             let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&marker))).await;
             let exit_code: i32 = check.trim().parse().unwrap_or(-1);
             if exit_code != 0 {
-                return Err("Permission denied".to_string());
+                return Err("Permission Denied: Sudo Required".to_string());
             }
             break;
         }
@@ -1007,7 +1007,7 @@ async fn download_directory(
             let check = format!("ls {} 2>&1", shell_escape(&remote_path));
             let check_output = exec_ssh(session, &check).await.unwrap_or_default();
             if check_output.contains("Permission denied") {
-                return Err("Permission denied".to_string());
+                return Err("Permission Denied: Sudo Required".to_string());
             }
         }
 
@@ -1195,7 +1195,7 @@ async fn start_virtual_drag(
         }
 
         if entries.is_empty() {
-            return Err("Permission denied".to_string());
+            return Err("Permission Denied: Sudo Required".to_string());
         }
 
         let has_files = entries.iter().any(|e| !e.is_dir);
@@ -1206,7 +1206,7 @@ async fn start_virtual_drag(
             let check = format!("ls {} 2>&1", shell_escape(&remote_path));
             let check_output = exec_ssh(session, &check).await.unwrap_or_default();
             if check_output.contains("Permission denied") {
-                return Err("Permission denied".to_string());
+                return Err("Permission Denied: Sudo Required".to_string());
             }
         }
 
