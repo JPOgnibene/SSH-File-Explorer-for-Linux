@@ -316,7 +316,7 @@ function App() {
         if (paths.length > 0) {
           (async () => {
             if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
-              setError("Permission denied: you do not have write access to this directory");
+              setError("Permission Denied: Sudo Required");
               return;
             }
             for (const localPath of paths) {
@@ -333,7 +333,7 @@ function App() {
                     await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
                   }
                 } else if (!dirWritable) {
-                  throw new Error("Permission denied");
+                  throw new Error("Permission Denied: Sudo Required");
                 } else {
                   try {
                     if (isDir) {
@@ -1054,7 +1054,7 @@ function App() {
 
   const handleUpload = async () => {
     if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
-      setError("Permission denied: you do not have write access to this directory");
+      setError("Permission Denied: Sudo Required");
       return;
     }
     try {
@@ -1070,7 +1070,7 @@ function App() {
           if (!dirWritable && sudoPassword && dirSudoWritable) {
             await invoke("sudo_upload_file", { transferId, localPath, remotePath, sudoPassword });
           } else if (!dirWritable) {
-            throw new Error("Permission denied");
+            throw new Error("Permission Denied: Sudo Required");
           } else {
             try {
               await invoke("upload_file", { transferId, localPath, remotePath });
@@ -1096,7 +1096,7 @@ function App() {
 
   const handleUploadDirectory = async () => {
     if (!dirWritable && !(sudoPassword && dirSudoWritable)) {
-      setError("Permission denied: you do not have write access to this directory");
+      setError("Permission Denied: Sudo Required");
       return;
     }
     try {
@@ -1111,7 +1111,7 @@ function App() {
         if (!dirWritable && sudoPassword && dirSudoWritable) {
           await invoke("sudo_upload_directory", { transferId, localPath, remotePath, sudoPassword });
         } else if (!dirWritable) {
-          throw new Error("Permission denied");
+          throw new Error("Permission Denied: Sudo Required");
         } else {
           try {
             await invoke("upload_directory", { transferId, localPath, remotePath });
@@ -1138,7 +1138,7 @@ function App() {
 
   if (!connected) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4" onContextMenu={(e) => e.preventDefault()}>
         <div className={`flex items-stretch gap-6 w-full ${savedConnections.length > 0 ? "max-w-3xl" : "max-w-md"}`}>
 
           {/* Saved connections panel */}
@@ -1153,11 +1153,6 @@ function App() {
                     disabled={connecting}
                     className="w-full flex items-center gap-3 px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg hover:border-emerald-500/40 hover:bg-zinc-900/80 transition group disabled:opacity-50 cursor-pointer"
                   >
-                    <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center shrink-0">
-                      <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
-                      </svg>
-                    </div>
                     <div className="flex-1 text-left min-w-0">
                       <div className="text-sm text-white font-medium truncate">{conn.label}</div>
                       <div className="text-xs text-zinc-500 truncate">
@@ -1182,11 +1177,6 @@ function App() {
           {/* Login form */}
           <div className="flex-1 max-w-md">
             <div className="text-center mb-8">
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-emerald-500/10 mb-4">
-                <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M12 5l7 7-7 7" />
-                </svg>
-              </div>
               <h1 className="text-2xl font-semibold text-white">SSH File Explorer</h1>
               <p className="text-zinc-500 mt-1">Connect to a remote Linux machine</p>
             </div>
@@ -1342,31 +1332,25 @@ function App() {
     <div className="min-h-screen bg-zinc-950 flex flex-col">
       {/* Top bar */}
       <div className="flex items-center gap-3 px-4 py-3 bg-zinc-900/50 border-b border-zinc-800">
-        <div className="flex items-center gap-2 text-sm text-zinc-400">
-          <div className="w-2 h-2 rounded-full bg-emerald-400" />
+        {!showSaveForm && (
+          <button
+            onClick={() => {
+              setSaveLabel(`${username}@${host}`);
+              setShowSaveForm(true);
+            }}
+            className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+            title="Save Connection"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+            </svg>
+          </button>
+        )}
+        <div className="flex items-center text-sm text-zinc-400">
           <span className="text-zinc-300 font-medium">{username}@{host}</span>
         </div>
 
-        {/* Breadcrumb */}
-        <div className="flex-1 flex items-center gap-1 text-sm overflow-x-auto mx-4">
-          <button
-            onClick={() => listFiles("/")}
-            className="text-zinc-400 hover:text-white transition shrink-0 cursor-pointer"
-          >
-            /
-          </button>
-          {pathSegments.map((seg, i) => (
-            <span key={i} className="flex items-center gap-1 shrink-0">
-              <span className="text-zinc-600">/</span>
-              <button
-                onClick={() => navigateToSegment(i)}
-                className="text-zinc-400 hover:text-white transition cursor-pointer"
-              >
-                {seg}
-              </button>
-            </span>
-          ))}
-        </div>
+        <div className="flex-1" />
 
         {/* Action buttons */}
         <div className="relative">
@@ -1394,10 +1378,10 @@ function App() {
             setShowNewFileInput(true);
             setNewFileName("");
           }}
-          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          className="px-3 py-1.5 text-lg leading-none text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
           title="New file or folder"
         >
-          + New File/Folder
+          +
         </button>
         <div className="relative">
           <button
@@ -1405,10 +1389,12 @@ function App() {
               const menu = e.currentTarget.nextElementSibling;
               if (menu) menu.classList.toggle("hidden");
             }}
-            className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+            className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
             title="Upload files or folder"
           >
-            Upload
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v16" />
+            </svg>
           </button>
           <div className="hidden absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg z-50 min-w-[120px]">
             <button
@@ -1426,23 +1412,14 @@ function App() {
           </div>
         </div>
 
-        {!showSaveForm && (
-          <button
-            onClick={() => {
-              setSaveLabel(`${username}@${host}`);
-              setShowSaveForm(true);
-            }}
-            className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
-          >
-            Save
-          </button>
-        )}
-
         <button
           onClick={handleDisconnect}
-          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          className="px-2 py-1.5 text-xs text-zinc-400 hover:text-red-400 bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          title="Disconnect"
         >
-          Disconnect
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+          </svg>
         </button>
       </div>
 
@@ -1608,6 +1585,27 @@ function App() {
           </span>
         </div>
       )}
+
+      {/* Breadcrumb bar */}
+      <div className="flex items-center gap-1 px-4 py-1.5 text-sm bg-zinc-900/30 border-b border-zinc-800 overflow-x-auto">
+        <button
+          onClick={() => listFiles("/")}
+          className="text-zinc-400 hover:text-white transition shrink-0 cursor-pointer"
+        >
+          /
+        </button>
+        {pathSegments.map((seg, i) => (
+          <span key={i} className="flex items-center gap-1 shrink-0">
+            <span className="text-zinc-600">/</span>
+            <button
+              onClick={() => navigateToSegment(i)}
+              className="text-zinc-400 hover:text-white transition cursor-pointer"
+            >
+              {seg}
+            </button>
+          </span>
+        ))}
+      </div>
 
       {/* Delete confirmation modal */}
       {confirmDelete && (
@@ -1913,9 +1911,24 @@ function App() {
       {/* Context menu */}
       {contextMenu && (
         <div
+          ref={(el) => {
+            if (!el) return;
+            const rect = el.getBoundingClientRect();
+            let x = contextMenu.x;
+            let y = contextMenu.y;
+            if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4;
+            if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4;
+            if (x < 0) x = 4;
+            if (y < 0) y = 4;
+            if (el.style.left !== `${x}px` || el.style.top !== `${y}px`) {
+              el.style.left = `${x}px`;
+              el.style.top = `${y}px`;
+            }
+          }}
           className="fixed z-50 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[160px]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={() => setContextMenu(null)}
+          onContextMenu={(e) => e.preventDefault()}
         >
           <button
             onClick={() => listFiles(currentPath)}
