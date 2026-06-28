@@ -5077,6 +5077,7 @@ dependencies = [
  "async-trait",
  "dirs",
  "keyring",
+ "raw-window-handle",
  "russh",
  "russh-keys",
  "russh-sftp",

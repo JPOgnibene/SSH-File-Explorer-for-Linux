@@ -44,7 +44,7 @@ interface SshKeyInfo {
 
 interface Transfer {
   id: string;
-  type: 'upload' | 'download';
+  type: 'upload' | 'download' | 'copy';
   fileName: string;
   bytesTransferred: number;
   totalBytes: number;
@@ -108,6 +108,10 @@ function App() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
 
+  const navHistoryRef = useRef<string[]>(["/"]);
+  const navIndexRef = useRef(0);
+  const navSkipPushRef = useRef(false);
+
   const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([]);
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [saveLabel, setSaveLabel] = useState("");
@@ -122,7 +126,17 @@ function App() {
   const [showNewFileInput, setShowNewFileInput] = useState(false);
   const [newFileName, setNewFileName] = useState("");
 
-  const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<FileEntry[] | null>(null);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: FileEntry | null } | null>(null);
+  const [clipboard, setClipboard] = useState<{ path: string; name: string; is_dir: boolean }[] | null>(null);
+
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const lastClickedRef = useRef<string | null>(null);
+
+  const internalDragRef = useRef<FileEntry[] | null>(null);
+  const [isDraggingInternal, setIsDraggingInternal] = useState(false);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
 
   const [dirWritable, setDirWritable] = useState(false);
   const [dirSudoWritable, setDirSudoWritable] = useState(false);
@@ -161,9 +175,13 @@ function App() {
         });
       }
     };
+    const dismissContextMenu = () => setContextMenu(null);
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("click", dismissContextMenu);
+    return () => { window.removeEventListener("keydown", handleKeyDown); window.removeEventListener("click", dismissContextMenu); };
   }, [connected]);
+
+  const listFilesRef = useRef<(path: string) => Promise<void>>(null as unknown as (path: string) => Promise<void>);
 
   const loadSshKeys = async () => {
     try {
@@ -213,7 +231,7 @@ function App() {
           updated[idx] = { ...updated[idx], bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes };
           return updated;
         }
-        return [...prev, { id: p.id, type: p.transfer_type as 'upload' | 'download', fileName: p.file_name, bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes }];
+        return [...prev, { id: p.id, type: p.transfer_type as 'upload' | 'download' | 'copy', fileName: p.file_name, bytesTransferred: p.bytes_transferred, totalBytes: p.total_bytes }];
       });
     }).then(fn => { if (cancelled) { fn(); return; } unlisten = fn; });
     return () => { cancelled = true; unlisten?.(); };
@@ -422,7 +440,16 @@ function App() {
         return a.name.localeCompare(b.name);
       });
       setFiles(entries);
+      setSelectedFiles(new Set());
       setCurrentPath(path);
+      if (navSkipPushRef.current) {
+        navSkipPushRef.current = false;
+      } else {
+        const hist = navHistoryRef.current;
+        const idx = navIndexRef.current;
+        navHistoryRef.current = [...hist.slice(0, idx + 1), path];
+        navIndexRef.current = navHistoryRef.current.length - 1;
+      }
       let writable = false;
       try {
         writable = await invoke("check_writable", { path }) as boolean;
@@ -441,6 +468,95 @@ function App() {
       setLoading(false);
     }
   }, [sudoPassword]);
+
+  listFilesRef.current = listFiles;
+
+  useEffect(() => {
+    if (!connected) return;
+    const handleMouseButton = (e: MouseEvent) => {
+      if (e.button === 3 || e.button === 4) {
+        e.preventDefault();
+        const hist = navHistoryRef.current;
+        const idx = navIndexRef.current;
+        if (e.button === 3 && idx > 0) {
+          navIndexRef.current = idx - 1;
+          navSkipPushRef.current = true;
+          listFilesRef.current?.(hist[idx - 1]);
+        } else if (e.button === 4 && idx < hist.length - 1) {
+          navIndexRef.current = idx + 1;
+          navSkipPushRef.current = true;
+          listFilesRef.current?.(hist[idx + 1]);
+        }
+      }
+    };
+    window.addEventListener("mouseup", handleMouseButton);
+    return () => window.removeEventListener("mouseup", handleMouseButton);
+  }, [connected]);
+
+  const oleDragActiveRef = useRef(false);
+
+  useEffect(() => {
+    if (!isDraggingInternal) return;
+    document.body.style.cursor = 'grabbing';
+
+    const startOleDrag = async () => {
+      const targets = internalDragRef.current;
+      if (!targets || targets.length === 0 || oleDragActiveRef.current) return;
+      oleDragActiveRef.current = true;
+      setDropTarget(null);
+
+      let result: string;
+      if (targets.length > 1) {
+        result = await handleMultiDragOut(targets);
+      } else {
+        result = await handleDragOut(targets[0]);
+      }
+      oleDragActiveRef.current = false;
+
+      if (result === "reentry") {
+        document.body.style.cursor = 'grabbing';
+        return;
+      }
+      document.body.style.cursor = '';
+      setIsDraggingInternal(false);
+      setDropTarget(null);
+      internalDragRef.current = null;
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!internalDragRef.current || oleDragActiveRef.current) return;
+      const atEdge = e.clientX <= 0 || e.clientY <= 0 ||
+          e.clientX >= window.innerWidth - 1 || e.clientY >= window.innerHeight - 1;
+      if (atEdge) {
+        startOleDrag();
+        return;
+      }
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const row = el?.closest('tr[data-folder]');
+      setDropTarget(row ? row.getAttribute('data-folder') : null);
+    };
+
+    const handleMouseUp = () => {
+      if (oleDragActiveRef.current) return;
+      const targets = internalDragRef.current;
+      const dest = dropTarget;
+      document.body.style.cursor = '';
+      setIsDraggingInternal(false);
+      setDropTarget(null);
+      internalDragRef.current = null;
+      if (dest && targets && targets.length > 0) {
+        handleInternalCopy(targets, dest);
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+    };
+  }, [isDraggingInternal, dropTarget]);
 
   const doConnect = async (h: string, p: number, u: string, pw: string) => {
     setConnecting(true);
@@ -566,6 +682,8 @@ function App() {
     setCurrentPath("/");
     setError("");
     setSudoPassword("");
+    setClipboard(null);
+    setSelectedFiles(new Set());
     closeEditor();
   };
 
@@ -642,31 +760,91 @@ function App() {
     }
   };
 
-  const handleDeleteFile = async (file: FileEntry) => {
-    const filePath =
-      currentPath === "/"
-        ? `/${file.name}`
-        : `${currentPath}/${file.name}`;
+  const handleDeleteFile = async (targets: FileEntry[]) => {
     setError("");
-    try {
+    setConfirmDelete(null);
+    for (const file of targets) {
+      const filePath =
+        currentPath === "/"
+          ? `/${file.name}`
+          : `${currentPath}/${file.name}`;
       try {
-        await invoke("delete_file", { path: filePath, isDir: file.is_dir });
-      } catch (e) {
-        if (isPermissionError(e) && sudoPassword) {
-          await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword });
-        } else {
-          throw e;
+        try {
+          await invoke("delete_file", { path: filePath, isDir: file.is_dir });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            await invoke("sudo_delete_file", { path: filePath, isDir: file.is_dir, sudoPassword });
+          } else {
+            throw e;
+          }
         }
+        if (editingFile === filePath) {
+          closeEditor();
+        }
+      } catch (e) {
+        setError(String(e));
       }
-      setConfirmDelete(null);
-      if (editingFile === filePath) {
-        closeEditor();
-      }
-      await listFiles(currentPath);
-    } catch (e) {
-      setConfirmDelete(null);
-      setError(String(e));
     }
+    setSelectedFiles(new Set());
+    await listFiles(currentPath);
+  };
+
+  const handlePaste = async () => {
+    if (!clipboard || clipboard.length === 0) return;
+    for (const item of clipboard) {
+      const dest = currentPath === "/" ? `/${item.name}` : `${currentPath}/${item.name}`;
+      if (item.path === dest) continue;
+      const transferId = `copy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'copy', fileName: item.name, bytesTransferred: 0, totalBytes: 0 }]);
+      try {
+        try {
+          await invoke("copy_path", { transferId, src: item.path, dest, isDir: item.is_dir });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            await invoke("sudo_copy_path", { transferId, src: item.path, dest, isDir: item.is_dir, sudoPassword });
+          } else {
+            throw e;
+          }
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
+      }
+    }
+    await listFiles(currentPath);
+  };
+
+  const handleInternalCopy = async (targets: FileEntry[], destFolder: string) => {
+    let destDir: string;
+    if (destFolder === "..") {
+      destDir = currentPath.substring(0, currentPath.lastIndexOf("/")) || "/";
+    } else {
+      destDir = currentPath === "/" ? `/${destFolder}` : `${currentPath}/${destFolder}`;
+    }
+    for (const file of targets) {
+      if (file.is_dir && file.name === destFolder) continue;
+      const src = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+      const dest = destDir === "/" ? `/${file.name}` : `${destDir}/${file.name}`;
+      const transferId = `copy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'copy', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
+      try {
+        try {
+          await invoke("copy_path", { transferId, src, dest, isDir: file.is_dir });
+        } catch (e) {
+          if (isPermissionError(e) && sudoPassword) {
+            await invoke("sudo_copy_path", { transferId, src, dest, isDir: file.is_dir, sudoPassword });
+          } else {
+            throw e;
+          }
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
+      }
+    }
+    await listFiles(currentPath);
   };
 
   const navigateUp = () => {
@@ -798,23 +976,76 @@ function App() {
     }
   };
 
-  const handleDragOut = async (file: FileEntry) => {
+  const handleMultiDownload = async (targets: FileEntry[]) => {
+    const selected = await open({ multiple: false, directory: true, title: `Save ${targets.length} items to...` });
+    if (!selected) return;
+    const destDir = String(selected);
+    for (const file of targets) {
+      const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+      const localPath = `${destDir}${destDir.endsWith("\\") || destDir.endsWith("/") ? "" : "/"}${file.name}`;
+      const transferId = `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: 0 }]);
+      try {
+        if (file.is_dir) {
+          await invoke("download_directory", { transferId, remotePath, localPath });
+        } else {
+          await invoke("download_file", { transferId, remotePath, localPath });
+        }
+      } catch (e) {
+        if (!String(e).includes("Transfer cancelled")) setError(String(e));
+      } finally {
+        setTransfers(prev => prev.filter(t => t.id !== transferId));
+      }
+    }
+  };
+
+  const handleDragOut = async (file: FileEntry): Promise<string> => {
     const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: file.size }]);
     setActiveDrag(file.name);
     document.body.style.cursor = 'grabbing';
     try {
-      await invoke("start_virtual_drag", {
+      const result: string = await invoke("start_virtual_drag", {
         transferId,
         remotePath,
         fileName: file.name,
         fileSize: file.size,
         isDir: file.is_dir,
       });
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+      return result;
     } catch (e) {
       if (!String(e).includes("Transfer cancelled")) setError(String(e));
       setTransfers(prev => prev.filter(t => t.id !== transferId));
+      return "error";
+    } finally {
+      setActiveDrag(null);
+      document.body.style.cursor = '';
+    }
+  };
+
+  const handleMultiDragOut = async (targets: FileEntry[]): Promise<string> => {
+    const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const totalSize = targets.reduce((sum, f) => sum + f.size, 0);
+    const label = `${targets.length} items`;
+    setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: label, bytesTransferred: 0, totalBytes: totalSize }]);
+    setActiveDrag(label);
+    document.body.style.cursor = 'grabbing';
+    try {
+      const filesArg = targets.map(f => ({
+        name: f.name,
+        remote_path: currentPath === "/" ? `/${f.name}` : `${currentPath}/${f.name}`,
+        size: f.size,
+        is_dir: f.is_dir,
+      }));
+      const result: string = await invoke("start_multi_drag", { transferId, files: filesArg });
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+      return result;
+    } catch (e) {
+      if (!String(e).includes("Transfer cancelled")) setError(String(e));
+      setTransfers(prev => prev.filter(t => t.id !== transferId));
+      return "error";
     } finally {
       setActiveDrag(null);
       document.body.style.cursor = '';
@@ -1382,10 +1613,18 @@ function App() {
       {confirmDelete && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-sm w-full mx-4 shadow-2xl">
-            <h3 className="text-white font-medium mb-2">Delete {confirmDelete.is_dir ? "folder" : "file"}?</h3>
+            <h3 className="text-white font-medium mb-2">
+              Delete {confirmDelete.length > 1 ? `${confirmDelete.length} items` : confirmDelete[0].is_dir ? "folder" : "file"}?
+            </h3>
             <p className="text-sm text-zinc-400 mb-4">
-              Are you sure you want to delete <span className="text-zinc-200 font-medium">{confirmDelete.name}</span>?
-              {confirmDelete.is_dir && " This will delete all contents inside it."}
+              {confirmDelete.length > 1 ? (
+                <>Are you sure you want to delete <span className="text-zinc-200 font-medium">{confirmDelete.length} items</span>?</>
+              ) : (
+                <>
+                  Are you sure you want to delete <span className="text-zinc-200 font-medium">{confirmDelete[0].name}</span>?
+                  {confirmDelete[0].is_dir && " This will delete all contents inside it."}
+                </>
+              )}
             </p>
             <div className="flex justify-end gap-2">
               <button
@@ -1408,7 +1647,10 @@ function App() {
       {/* Main content area */}
       <div className="flex-1 flex min-h-0">
         {/* File list */}
-        <div className={`overflow-auto ${editingFile ? "w-80 shrink-0 border-r border-zinc-800" : "flex-1"}`}>
+        <div
+          className={`overflow-auto ${editingFile ? "w-80 shrink-0 border-r border-zinc-800" : "flex-1"}`}
+          onContextMenu={(e) => { if ((e.target as HTMLElement).closest("tr")) return; e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, file: null }); }}
+        >
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800/50">
@@ -1426,8 +1668,9 @@ function App() {
             <tbody>
               {currentPath !== "/" && (
                 <tr
+                  data-folder=".."
                   onClick={navigateUp}
-                  className="hover:bg-zinc-900/50 cursor-pointer transition group"
+                  className={`cursor-pointer transition group ${dropTarget === ".." ? "bg-blue-500/30 ring-1 ring-blue-500/50" : "hover:bg-zinc-900/50"}`}
                 >
                   <td className="py-2 px-4 flex items-center gap-2.5">
                     <svg className="w-5 h-5 text-zinc-500" fill="currentColor" viewBox="0 0 20 20">
@@ -1449,11 +1692,47 @@ function App() {
                 files.map((file) => (
                   <tr
                     key={file.name}
-                    onClick={() => openFile(file)}
+                    {...(file.is_dir ? { "data-folder": file.name } : {})}
+                    onClick={(e) => {
+                      if (e.ctrlKey || e.metaKey) {
+                        e.preventDefault();
+                        setSelectedFiles(prev => {
+                          const next = new Set(prev);
+                          if (next.has(file.name)) next.delete(file.name); else next.add(file.name);
+                          return next;
+                        });
+                        lastClickedRef.current = file.name;
+                      } else if (e.shiftKey && lastClickedRef.current) {
+                        e.preventDefault();
+                        const names = files.map(f => f.name);
+                        const a = names.indexOf(lastClickedRef.current);
+                        const b = names.indexOf(file.name);
+                        const [start, end] = a < b ? [a, b] : [b, a];
+                        setSelectedFiles(new Set(names.slice(start, end + 1)));
+                      } else {
+                        setSelectedFiles(new Set());
+                        lastClickedRef.current = file.name;
+                        if (file.is_dir) openFile(file);
+                      }
+                    }}
+                    onDoubleClick={() => {
+                      if (!file.is_dir) openFile(file);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      if (!selectedFiles.has(file.name)) {
+                        setSelectedFiles(new Set());
+                      }
+                      setContextMenu({ x: e.clientX, y: e.clientY, file });
+                    }}
                     className={`border-b border-zinc-800/30 transition ${
-                      file.is_dir
-                        ? "hover:bg-zinc-900/50 cursor-pointer"
-                        : "hover:bg-zinc-900/30 cursor-pointer"
+                      dropTarget === file.name
+                        ? "bg-blue-500/30 ring-1 ring-blue-500/50"
+                        : selectedFiles.has(file.name)
+                          ? "bg-blue-500/20 hover:bg-blue-500/30"
+                          : file.is_dir
+                            ? "hover:bg-zinc-900/50 cursor-pointer"
+                            : "hover:bg-zinc-900/30 cursor-pointer"
                     } group ${
                       editingFile &&
                       editingFile === (currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`)
@@ -1484,10 +1763,14 @@ function App() {
                           onMouseDown={(e) => {
                             e.stopPropagation();
                             e.preventDefault();
-                            handleDragOut(file);
+                            const targets = selectedFiles.size > 1 && selectedFiles.has(file.name)
+                              ? files.filter(f => selectedFiles.has(f.name))
+                              : [file];
+                            internalDragRef.current = targets;
+                            setIsDraggingInternal(true);
                           }}
                           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-grab"
-                          title={`Drag ${file.name} to a folder`}
+                          title={selectedFiles.size > 1 && selectedFiles.has(file.name) ? `Drag ${selectedFiles.size} items` : `Drag ${file.name}`}
                         >
                           <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
@@ -1496,10 +1779,14 @@ function App() {
                         <div
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDownload(file);
+                            if (selectedFiles.size > 1 && selectedFiles.has(file.name)) {
+                              handleMultiDownload(files.filter(f => selectedFiles.has(f.name)));
+                            } else {
+                              handleDownload(file);
+                            }
                           }}
                           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
-                          title={`Download ${file.name}`}
+                          title={selectedFiles.size > 1 && selectedFiles.has(file.name) ? `Download ${selectedFiles.size} items` : `Download ${file.name}`}
                         >
                           <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -1508,10 +1795,14 @@ function App() {
                         <div
                           onClick={(e) => {
                             e.stopPropagation();
-                            setConfirmDelete(file);
+                            if (selectedFiles.size > 1 && selectedFiles.has(file.name)) {
+                              setConfirmDelete(files.filter(f => selectedFiles.has(f.name)));
+                            } else {
+                              setConfirmDelete([file]);
+                            }
                           }}
                           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-700 rounded transition cursor-pointer"
-                          title={`Delete ${file.name}`}
+                          title={selectedFiles.size > 1 && selectedFiles.has(file.name) ? `Delete ${selectedFiles.size} items` : `Delete ${file.name}`}
                         >
                           <svg className="w-3.5 h-3.5 text-zinc-500 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -1578,9 +1869,11 @@ function App() {
             const pct = transfer.totalBytes > 0 ? Math.round(transfer.bytesTransferred / transfer.totalBytes * 100) : 0;
             return (
               <div key={transfer.id} className="flex items-center gap-3 px-4 py-1.5">
-                <svg className={`w-3.5 h-3.5 shrink-0 ${transfer.type === 'upload' ? 'text-emerald-400' : 'text-blue-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className={`w-3.5 h-3.5 shrink-0 ${transfer.type === 'upload' ? 'text-emerald-400' : transfer.type === 'copy' ? 'text-amber-400' : 'text-blue-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   {transfer.type === 'upload' ? (
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  ) : transfer.type === 'copy' ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
                   ) : (
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                   )}
@@ -1600,7 +1893,7 @@ function App() {
                 <span className="text-xs text-zinc-300 truncate w-36">{transfer.fileName}</span>
                 <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                   <div
-                    className={`h-full rounded-full transition-all duration-150 ${transfer.type === 'upload' ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                    className={`h-full rounded-full transition-all duration-150 ${transfer.type === 'upload' ? 'bg-emerald-500' : transfer.type === 'copy' ? 'bg-amber-500' : 'bg-blue-500'}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>
@@ -1613,9 +1906,86 @@ function App() {
 
       {/* Status bar */}
       <div className="px-4 py-2 bg-zinc-900/30 border-t border-zinc-800 text-xs text-zinc-500 flex items-center justify-between">
-        <span>{files.length} items</span>
+        <span>{selectedFiles.size > 0 ? `${selectedFiles.size} selected · ` : ""}{files.length} items</span>
         <span>{editingFile ? editingFile : currentPath}</span>
       </div>
+
+      {/* Context menu */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[160px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={() => setContextMenu(null)}
+        >
+          <button
+            onClick={() => listFiles(currentPath)}
+            className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+          >
+            Refresh
+          </button>
+          {contextMenu.file && (
+            <>
+              <div className="border-t border-zinc-700 my-1" />
+              <button
+                onClick={() => {
+                  if (selectedFiles.size > 1 && contextMenu.file && selectedFiles.has(contextMenu.file.name)) {
+                    handleMultiDownload(files.filter(f => selectedFiles.has(f.name)));
+                  } else if (contextMenu.file) {
+                    handleDownload(contextMenu.file);
+                  }
+                }}
+                className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+              >
+                {selectedFiles.size > 1 && contextMenu.file && selectedFiles.has(contextMenu.file.name)
+                  ? `Download ${selectedFiles.size} items`
+                  : "Download"}
+              </button>
+              <button
+                onClick={() => {
+                  if (contextMenu.file) {
+                    if (selectedFiles.size > 1 && selectedFiles.has(contextMenu.file.name)) {
+                      setClipboard(files.filter(f => selectedFiles.has(f.name)).map(f => ({
+                        path: currentPath === "/" ? `/${f.name}` : `${currentPath}/${f.name}`,
+                        name: f.name,
+                        is_dir: f.is_dir,
+                      })));
+                    } else {
+                      const path = currentPath === "/" ? `/${contextMenu.file.name}` : `${currentPath}/${contextMenu.file.name}`;
+                      setClipboard([{ path, name: contextMenu.file.name, is_dir: contextMenu.file.is_dir }]);
+                    }
+                  }
+                }}
+                className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+              >
+                {selectedFiles.size > 1 && contextMenu.file && selectedFiles.has(contextMenu.file.name)
+                  ? `Copy ${selectedFiles.size} items`
+                  : "Copy"}
+              </button>
+            </>
+          )}
+          {clipboard && (
+            <>
+              <div className="border-t border-zinc-700 my-1" />
+              <button
+                onClick={handlePaste}
+                className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+              >
+                Paste {clipboard.length > 1 ? `${clipboard.length} items` : `"${clipboard[0].name}"`}
+              </button>
+            </>
+          )}
+          <div className="border-t border-zinc-700 my-1" />
+          <button
+            onClick={() => {
+              setShowNewFileInput(true);
+              setNewFileName("");
+            }}
+            className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+          >
+            New File/Folder
+          </button>
+        </div>
+      )}
 
       {/* Drag-over overlay */}
       {dragOverWindow && (

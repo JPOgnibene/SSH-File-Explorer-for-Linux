@@ -4,6 +4,11 @@ use tokio::sync::Mutex;
 use russh::*;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(target_os = "windows")]
+#[allow(deprecated)]
+use raw_window_handle::HasRawWindowHandle;
+#[cfg(target_os = "windows")]
+use raw_window_handle::RawWindowHandle;
 
 static CANCELLED_TRANSFERS: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
@@ -708,6 +713,142 @@ async fn sudo_delete_file(path: String, is_dir: bool, sudo_password: String, sta
     Ok(())
 }
 
+#[tauri::command]
+async fn copy_path(
+    app: AppHandle,
+    transfer_id: String,
+    src: String,
+    dest: String,
+    is_dir: bool,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let file_name = src.rsplit('/').next().unwrap_or(&src).to_string();
+
+    let size_cmd = if is_dir {
+        format!("du -sb {} 2>/dev/null | cut -f1", shell_escape(&src))
+    } else {
+        format!("stat -c '%s' {} 2>/dev/null", shell_escape(&src))
+    };
+    let total_bytes: u64 = exec_ssh(session, &size_cmd).await
+        .unwrap_or_default().trim().parse().unwrap_or(0);
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        id: transfer_id.clone(), transfer_type: "copy".into(),
+        file_name: file_name.clone(), bytes_transferred: 0, total_bytes,
+    });
+
+    let marker = format!("/tmp/.cp_done_{}", transfer_id);
+    let cp_cmd = if is_dir {
+        format!("(cp -r {} {} ; echo $? > {}) >/dev/null 2>&1 &", shell_escape(&src), shell_escape(&dest), shell_escape(&marker))
+    } else {
+        format!("(cp {} {} ; echo $? > {}) >/dev/null 2>&1 &", shell_escape(&src), shell_escape(&dest), shell_escape(&marker))
+    };
+    exec_ssh(session, &cp_cmd).await?;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let check = exec_ssh(session, &format!("cat {} 2>/dev/null", shell_escape(&marker))).await.unwrap_or_default();
+        if !check.trim().is_empty() {
+            let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&marker))).await;
+            let exit_code: i32 = check.trim().parse().unwrap_or(-1);
+            if exit_code != 0 {
+                return Err("Permission denied".to_string());
+            }
+            break;
+        }
+        let poll_cmd = if is_dir {
+            format!("du -sb {} 2>/dev/null | cut -f1", shell_escape(&dest))
+        } else {
+            format!("stat -c '%s' {} 2>/dev/null", shell_escape(&dest))
+        };
+        if let Ok(out) = exec_ssh(session, &poll_cmd).await {
+            let current: u64 = out.trim().parse().unwrap_or(0);
+            let _ = app.emit("transfer-progress", TransferProgress {
+                id: transfer_id.clone(), transfer_type: "copy".into(),
+                file_name: file_name.clone(), bytes_transferred: current, total_bytes,
+            });
+        }
+    }
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        id: transfer_id.clone(), transfer_type: "copy".into(),
+        file_name, bytes_transferred: total_bytes, total_bytes,
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn sudo_copy_path(
+    app: AppHandle,
+    transfer_id: String,
+    src: String,
+    dest: String,
+    is_dir: bool,
+    sudo_password: String,
+    state: State<'_, SshSession>,
+) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let file_name = src.rsplit('/').next().unwrap_or(&src).to_string();
+
+    let size_cmd = if is_dir {
+        format!("du -sb {}", shell_escape(&src))
+    } else {
+        format!("stat -c '%s' {}", shell_escape(&src))
+    };
+    let size_out = sudo_exec_ssh(session, &sudo_password, &size_cmd).await.unwrap_or_default();
+    let total_bytes: u64 = size_out.split_whitespace().next()
+        .and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        id: transfer_id.clone(), transfer_type: "copy".into(),
+        file_name: file_name.clone(), bytes_transferred: 0, total_bytes,
+    });
+
+    let marker = format!("/tmp/.cp_done_{}", transfer_id);
+    let cp_cmd = if is_dir {
+        format!("cp -r {} {}", shell_escape(&src), shell_escape(&dest))
+    } else {
+        format!("cp {} {}", shell_escape(&src), shell_escape(&dest))
+    };
+    let bg_cmd = format!("({} ; echo $? > {}) >/dev/null 2>&1 &", cp_cmd, shell_escape(&marker));
+    sudo_exec_ssh(session, &sudo_password, &bg_cmd).await?;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let check = exec_ssh(session, &format!("cat {} 2>/dev/null", shell_escape(&marker))).await.unwrap_or_default();
+        if !check.trim().is_empty() {
+            let _ = exec_ssh(session, &format!("rm -f {}", shell_escape(&marker))).await;
+            let exit_code: i32 = check.trim().parse().unwrap_or(-1);
+            if exit_code != 0 {
+                return Err("Permission denied".to_string());
+            }
+            break;
+        }
+        let poll_cmd = if is_dir {
+            format!("du -sb {} 2>/dev/null | cut -f1", shell_escape(&dest))
+        } else {
+            format!("stat -c '%s' {} 2>/dev/null", shell_escape(&dest))
+        };
+        if let Ok(out) = exec_ssh(session, &poll_cmd).await {
+            let current: u64 = out.split_whitespace().next()
+                .and_then(|s| s.parse().ok()).unwrap_or(0);
+            let _ = app.emit("transfer-progress", TransferProgress {
+                id: transfer_id.clone(), transfer_type: "copy".into(),
+                file_name: file_name.clone(), bytes_transferred: current, total_bytes,
+            });
+        }
+    }
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        id: transfer_id.clone(), transfer_type: "copy".into(),
+        file_name, bytes_transferred: total_bytes, total_bytes,
+    });
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct SearchResult {
     path: String,
@@ -1001,7 +1142,7 @@ async fn start_virtual_drag(
     file_size: u64,
     is_dir: bool,
     state: State<'_, SshSession>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let rt_handle = tokio::runtime::Handle::current();
     let ssh_state = state.inner().clone();
 
@@ -1085,6 +1226,7 @@ async fn start_virtual_drag(
     let display_name = file_name.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let app_for_drag = app.clone();
+    let hwnd = get_app_hwnd(&app)?;
 
     app.run_on_main_thread(move || {
         let result = virtual_drag::start_drag(
@@ -1095,6 +1237,118 @@ async fn start_virtual_drag(
             display_name,
             app_for_drag,
             transfer_id,
+            hwnd,
+        );
+        let _ = tx.send(result);
+    }).map_err(|e| format!("Failed to schedule drag on main thread: {}", e))?;
+
+    rx.await.map_err(|_| "Drag thread error".to_string())?
+}
+
+#[cfg(target_os = "windows")]
+fn get_app_hwnd(app: &AppHandle) -> Result<windows::Win32::Foundation::HWND, String> {
+    let window = app.get_webview_window("main").ok_or("No main window")?;
+    #[allow(deprecated)]
+    let handle = window.raw_window_handle().map_err(|e| format!("{}", e))?;
+    match handle {
+        RawWindowHandle::Win32(h) => {
+            Ok(windows::Win32::Foundation::HWND(isize::from(h.hwnd)))
+        }
+        _ => Err("Not a Win32 window".to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DragFileInfo {
+    name: String,
+    remote_path: String,
+    size: u64,
+    is_dir: bool,
+}
+
+#[tauri::command]
+async fn start_multi_drag(
+    app: AppHandle,
+    transfer_id: String,
+    files: Vec<DragFileInfo>,
+    state: State<'_, SshSession>,
+) -> Result<String, String> {
+    if files.is_empty() { return Ok("done".to_string()); }
+
+    let rt_handle = tokio::runtime::Handle::current();
+    let ssh_state = state.inner().clone();
+
+    let mut all_entries = Vec::new();
+    let mut total_size = 0u64;
+
+    for file in &files {
+        if file.is_dir {
+            let output = {
+                let s = state.lock().await;
+                let session = s.session.as_ref().ok_or("Not connected")?;
+                let cmd = format!(
+                    "find {} -printf '%y|%s|%P\\n' 2>/dev/null",
+                    shell_escape(&file.remote_path)
+                );
+                exec_ssh(session, &cmd).await?
+            };
+            for line in output.lines() {
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                if parts.len() < 3 { continue; }
+                let ftype = parts[0];
+                let size: u64 = parts[1].parse().unwrap_or(0);
+                let rel = parts[2];
+                let is_entry_dir = ftype == "d";
+                let relative = if rel.is_empty() {
+                    file.name.clone()
+                } else {
+                    format!("{}/{}", file.name, rel)
+                };
+                let full_remote = if rel.is_empty() {
+                    file.remote_path.clone()
+                } else {
+                    format!("{}/{}", file.remote_path, rel)
+                };
+                if !is_entry_dir { total_size += size; }
+                all_entries.push(virtual_drag::VirtualFileEntry {
+                    relative_path: relative,
+                    remote_path: full_remote,
+                    is_dir: is_entry_dir,
+                    file_size: if is_entry_dir { 0 } else { size },
+                });
+            }
+        } else {
+            total_size += file.size;
+            all_entries.push(virtual_drag::VirtualFileEntry {
+                relative_path: file.name.clone(),
+                remote_path: file.remote_path.clone(),
+                is_dir: false,
+                file_size: file.size,
+            });
+        }
+    }
+
+    if all_entries.is_empty() {
+        return Err("No files to drag".to_string());
+    }
+
+    let display_name = if files.len() == 1 { files[0].name.clone() } else { format!("{} items", files.len()) };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let app_for_drag = app.clone();
+    let hwnd = get_app_hwnd(&app)?;
+
+    app.run_on_main_thread(move || {
+        let result = virtual_drag::start_drag(
+            rt_handle,
+            ssh_state,
+            all_entries,
+            total_size,
+            display_name,
+            app_for_drag,
+            transfer_id,
+            hwnd,
         );
         let _ = tx.send(result);
     }).map_err(|e| format!("Failed to schedule drag on main thread: {}", e))?;
@@ -1574,11 +1828,14 @@ pub fn run() {
             sudo_create_file,
             sudo_create_directory,
             sudo_delete_file,
+            copy_path,
+            sudo_copy_path,
             search_files,
             sudo_search_files,
             download_file,
             download_directory,
             start_virtual_drag,
+            start_multi_drag,
             get_progress_port,
             is_local_directory,
             upload_file,
