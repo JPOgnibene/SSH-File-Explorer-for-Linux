@@ -1138,7 +1138,7 @@ function App() {
 
   if (!connected) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4" onContextMenu={(e) => e.preventDefault()}>
         <div className={`flex items-stretch gap-6 w-full ${savedConnections.length > 0 ? "max-w-3xl" : "max-w-md"}`}>
 
           {/* Saved connections panel */}
@@ -1902,9 +1902,24 @@ function App() {
       {/* Context menu */}
       {contextMenu && (
         <div
+          ref={(el) => {
+            if (!el) return;
+            const rect = el.getBoundingClientRect();
+            let x = contextMenu.x;
+            let y = contextMenu.y;
+            if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4;
+            if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4;
+            if (x < 0) x = 4;
+            if (y < 0) y = 4;
+            if (el.style.left !== `${x}px` || el.style.top !== `${y}px`) {
+              el.style.left = `${x}px`;
+              el.style.top = `${y}px`;
+            }
+          }}
           className="fixed z-50 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[160px]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={() => setContextMenu(null)}
+          onContextMenu={(e) => e.preventDefault()}
         >
           <button
             onClick={() => listFiles(currentPath)}
