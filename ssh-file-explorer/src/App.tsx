@@ -1332,6 +1332,20 @@ function App() {
     <div className="min-h-screen bg-zinc-950 flex flex-col">
       {/* Top bar */}
       <div className="flex items-center gap-3 px-4 py-3 bg-zinc-900/50 border-b border-zinc-800">
+        {!showSaveForm && (
+          <button
+            onClick={() => {
+              setSaveLabel(`${username}@${host}`);
+              setShowSaveForm(true);
+            }}
+            className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+            title="Save Connection"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+            </svg>
+          </button>
+        )}
         <div className="flex items-center text-sm text-zinc-400">
           <span className="text-zinc-300 font-medium">{username}@{host}</span>
         </div>
@@ -1383,10 +1397,10 @@ function App() {
             setShowNewFileInput(true);
             setNewFileName("");
           }}
-          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          className="px-3 py-1.5 text-lg leading-none text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
           title="New file or folder"
         >
-          + New File/Folder
+          +
         </button>
         <div className="relative">
           <button
@@ -1394,10 +1408,12 @@ function App() {
               const menu = e.currentTarget.nextElementSibling;
               if (menu) menu.classList.toggle("hidden");
             }}
-            className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+            className="px-2 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
             title="Upload files or folder"
           >
-            Upload
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v16" />
+            </svg>
           </button>
           <div className="hidden absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg z-50 min-w-[120px]">
             <button
@@ -1415,23 +1431,14 @@ function App() {
           </div>
         </div>
 
-        {!showSaveForm && (
-          <button
-            onClick={() => {
-              setSaveLabel(`${username}@${host}`);
-              setShowSaveForm(true);
-            }}
-            className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
-          >
-            Save
-          </button>
-        )}
-
         <button
           onClick={handleDisconnect}
-          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          className="px-2 py-1.5 text-xs text-zinc-400 hover:text-red-400 bg-zinc-800 hover:bg-zinc-700 rounded-md transition cursor-pointer"
+          title="Disconnect"
         >
-          Disconnect
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+          </svg>
         </button>
       </div>
 
