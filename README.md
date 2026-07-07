@@ -20,9 +20,10 @@ Built with [Tauri v2](https://v2.tauri.app/) (Rust backend) and React + TypeScri
 
 ### File operations
 - **Create files and folders** — including nested directory paths
+- **Rename** files and folders inline via the right-click context menu
 - **Delete** with confirmation modal (supports multi-select)
 - **Copy and paste** files and folders within the remote filesystem, with real-time progress bars
-- **Right-click context menu** with Copy, Paste, Download, Delete, and New File/Folder options
+- **Right-click context menu** with Rename, Copy, Paste, Download, Delete, and New File/Folder options
 - **Sudo auto-retry** — operations that fail due to permissions are automatically retried with elevated privileges
 
 ### Transfers
