@@ -127,6 +127,8 @@ function App() {
   const [newFileName, setNewFileName] = useState("");
 
   const [confirmDelete, setConfirmDelete] = useState<FileEntry[] | null>(null);
+  const [renamingFile, setRenamingFile] = useState<FileEntry | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: FileEntry | null } | null>(null);
   const [clipboard, setClipboard] = useState<{ path: string; name: string; is_dir: boolean }[] | null>(null);
@@ -786,6 +788,36 @@ function App() {
       }
     }
     setSelectedFiles(new Set());
+    await listFiles(currentPath);
+  };
+
+  const handleRename = async () => {
+    if (!renamingFile || !renameValue.trim() || renameValue === renamingFile.name) {
+      setRenamingFile(null);
+      setRenameValue("");
+      return;
+    }
+    setError("");
+    const oldPath = currentPath === "/" ? `/${renamingFile.name}` : `${currentPath}/${renamingFile.name}`;
+    const newPath = currentPath === "/" ? `/${renameValue.trim()}` : `${currentPath}/${renameValue.trim()}`;
+    try {
+      try {
+        await invoke("rename_file", { oldPath, newPath });
+      } catch (e) {
+        if (isPermissionError(e) && sudoPassword) {
+          await invoke("sudo_rename_file", { oldPath, newPath, sudoPassword });
+        } else {
+          throw e;
+        }
+      }
+      if (editingFile === oldPath) {
+        closeEditor();
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+    setRenamingFile(null);
+    setRenameValue("");
     await listFiles(currentPath);
   };
 
@@ -1740,9 +1772,24 @@ function App() {
                   >
                     <td className="py-2 px-4 flex items-center gap-2.5">
                       <FileIcon isDir={file.is_dir} />
-                      <span className="text-zinc-300 group-hover:text-white transition truncate">
-                        {file.name}
-                      </span>
+                      {renamingFile?.name === file.name ? (
+                        <input
+                          autoFocus
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleRename();
+                            if (e.key === "Escape") { setRenamingFile(null); setRenameValue(""); }
+                          }}
+                          onBlur={handleRename}
+                          className="bg-zinc-800 text-zinc-200 text-sm px-2 py-0.5 rounded border border-zinc-600 focus:border-emerald-500 outline-none flex-1 min-w-0"
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span className="text-zinc-300 group-hover:text-white transition truncate">
+                          {file.name}
+                        </span>
+                      )}
                     </td>
                     {!editingFile && (
                       <>
@@ -1974,6 +2021,37 @@ function App() {
                   ? `Copy ${selectedFiles.size} items`
                   : "Copy"}
               </button>
+              <button
+                onClick={() => {
+                  if (contextMenu.file) {
+                    if (selectedFiles.size > 1 && selectedFiles.has(contextMenu.file.name)) {
+                      setConfirmDelete(files.filter(f => selectedFiles.has(f.name)));
+                    } else {
+                      setConfirmDelete([contextMenu.file]);
+                    }
+                  }
+                  setContextMenu(null);
+                }}
+                className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-zinc-700 hover:text-red-300 transition"
+              >
+                {selectedFiles.size > 1 && contextMenu.file && selectedFiles.has(contextMenu.file.name)
+                  ? `Delete ${selectedFiles.size} items`
+                  : "Delete"}
+              </button>
+              {!(selectedFiles.size > 1 && selectedFiles.has(contextMenu.file.name)) && (
+                <button
+                  onClick={() => {
+                    if (contextMenu.file) {
+                      setRenamingFile(contextMenu.file);
+                      setRenameValue(contextMenu.file.name);
+                    }
+                    setContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition"
+                >
+                  Rename
+                </button>
+              )}
             </>
           )}
           {clipboard && (

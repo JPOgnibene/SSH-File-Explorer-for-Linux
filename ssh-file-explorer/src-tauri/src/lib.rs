@@ -661,6 +661,27 @@ async fn delete_file(path: String, is_dir: bool, state: State<'_, SshSession>) -
 }
 
 #[tauri::command]
+async fn rename_file(old_path: String, new_path: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("mv {} {} 2>&1", shell_escape(&old_path), shell_escape(&new_path));
+    let output = exec_ssh(session, &cmd).await?;
+    if !output.trim().is_empty() {
+        return Err(output.trim().to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sudo_rename_file(old_path: String, new_path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<(), String> {
+    let s = state.lock().await;
+    let session = s.session.as_ref().ok_or("Not connected")?;
+    let cmd = format!("mv {} {}", shell_escape(&old_path), shell_escape(&new_path));
+    sudo_exec_ssh(session, &sudo_password, &cmd).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn sudo_read_file(path: String, sudo_password: String, state: State<'_, SshSession>) -> Result<String, String> {
     let s = state.lock().await;
     let session = s.session.as_ref().ok_or("Not connected")?;
@@ -1823,6 +1844,8 @@ pub fn run() {
             create_file,
             create_directory,
             delete_file,
+            rename_file,
+            sudo_rename_file,
             sudo_read_file,
             sudo_write_file,
             sudo_create_file,
