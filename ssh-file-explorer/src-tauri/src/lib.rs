@@ -1280,6 +1280,9 @@ fn get_app_hwnd(app: &AppHandle) -> Result<windows::Win32::Foundation::HWND, Str
 }
 
 #[derive(serde::Deserialize)]
+// On non-Windows the fields are only used for deserialization; the drag code
+// that reads them is Windows-only, so silence the dead-code lint there.
+#[cfg_attr(not(windows), allow(dead_code))]
 struct DragFileInfo {
     name: String,
     remote_path: String,
