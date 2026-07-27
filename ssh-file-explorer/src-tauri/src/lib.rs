@@ -1287,6 +1287,7 @@ struct DragFileInfo {
     is_dir: bool,
 }
 
+#[cfg(windows)]
 #[tauri::command]
 async fn start_multi_drag(
     app: AppHandle,
@@ -1375,6 +1376,35 @@ async fn start_multi_drag(
     }).map_err(|e| format!("Failed to schedule drag on main thread: {}", e))?;
 
     rx.await.map_err(|_| "Drag thread error".to_string())?
+}
+
+// Non-Windows platforms have no OLE virtual-file drag source. These stubs keep
+// the Tauri command surface identical across platforms so `generate_handler!`
+// compiles; the Linux/macOS frontend routes "drag out" through a save-folder
+// dialog + download instead of invoking these (see handleDragOut in App.tsx).
+#[cfg(not(windows))]
+#[tauri::command]
+async fn start_virtual_drag(
+    _app: AppHandle,
+    _transfer_id: String,
+    _remote_path: String,
+    _file_name: String,
+    _file_size: u64,
+    _is_dir: bool,
+    _state: State<'_, SshSession>,
+) -> Result<String, String> {
+    Err("Drag-to-desktop is not supported on this platform".to_string())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+async fn start_multi_drag(
+    _app: AppHandle,
+    _transfer_id: String,
+    _files: Vec<DragFileInfo>,
+    _state: State<'_, SshSession>,
+) -> Result<String, String> {
+    Err("Drag-to-desktop is not supported on this platform".to_string())
 }
 
 #[tauri::command]

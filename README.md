@@ -29,7 +29,7 @@ Built with [Tauri v2](https://v2.tauri.app/) (Rust backend) and React + TypeScri
 ### Transfers
 - **Upload files and folders** from your local machine to the remote server
 - **Download files and folders** from the remote server to your local machine
-- **Drag and drop to desktop** — drag files out of the app window directly onto your desktop or into other applications (Windows)
+- **Drag files out** — on **Windows**, drag files directly onto your desktop or into other applications; on **Linux/macOS**, the same drag-toward-the-edge gesture opens a save-folder dialog and downloads the selection
 - **Drag and drop upload** — drag files from your desktop into the app to upload them
 - **Real-time progress bars** for all transfers (uploads, downloads, and copies) with cancel support
 
@@ -43,6 +43,14 @@ Built with [Tauri v2](https://v2.tauri.app/) (Rust backend) and React + TypeScri
 - [Node.js](https://nodejs.org/) (v18 or later)
 - [Rust](https://www.rust-lang.org/tools/install) (stable toolchain)
 - **Windows**: [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload
+- **Linux**: the Tauri v2 system libraries. On Debian/Ubuntu:
+
+  ```bash
+  sudo apt-get install libwebkit2gtk-4.1-dev build-essential curl wget file \
+    libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+  ```
+
+  (See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) for other distributions.)
 
 ## Build from source
 
@@ -63,11 +71,21 @@ npm run tauri build
 
 Build output is written to `ssh-file-explorer/src-tauri/target/release/`:
 
+**Windows**
+
 | Artifact | Path |
 |----------|------|
 | Executable | `ssh-file-explorer.exe` |
 | MSI installer | `bundle/msi/ssh-file-explorer_*_x64_en-US.msi` |
 | NSIS installer | `bundle/nsis/ssh-file-explorer_*_x64-setup.exe` |
+
+**Linux**
+
+| Artifact | Path |
+|----------|------|
+| AppImage | `bundle/appimage/ssh-file-explorer_*_amd64.AppImage` |
+| Debian package | `bundle/deb/ssh-file-explorer_*_amd64.deb` |
+| RPM package | `bundle/rpm/ssh-file-explorer-*.x86_64.rpm` |
 
 ## Project structure
 

@@ -16,6 +16,12 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
+// Windows uses a native OLE virtual-file drag source to drop remote files onto
+// the desktop. Other platforms (Linux/macOS) have no equivalent, so the same
+// edge-drag gesture falls back to a save-folder dialog + download.
+const IS_WINDOWS =
+  typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+
 interface FileEntry {
   name: string;
   is_dir: boolean;
@@ -1032,6 +1038,12 @@ function App() {
   };
 
   const handleDragOut = async (file: FileEntry): Promise<string> => {
+    if (!IS_WINDOWS) {
+      // No native drag-to-desktop on this platform: reuse the download flow,
+      // which prompts for a destination and streams the file(s) there.
+      await handleDownload(file);
+      return "done";
+    }
     const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: file.size }]);
@@ -1058,6 +1070,10 @@ function App() {
   };
 
   const handleMultiDragOut = async (targets: FileEntry[]): Promise<string> => {
+    if (!IS_WINDOWS) {
+      await handleMultiDownload(targets);
+      return "done";
+    }
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const totalSize = targets.reduce((sum, f) => sum + f.size, 0);
     const label = `${targets.length} items`;

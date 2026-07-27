@@ -24,6 +24,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Browse and manage remote Linux files over SSH",
+    "longDescription": "A native desktop app for browsing and managing files on remote Linux machines over SSH. Connect with a password or key, then upload, download, copy, paste, rename, and edit files as if they were local.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
