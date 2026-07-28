@@ -87,6 +87,78 @@ Build output is written to `ssh-file-explorer/src-tauri/target/release/`:
 | Debian package | `bundle/deb/ssh-file-explorer_*_amd64.deb` |
 | RPM package | `bundle/rpm/ssh-file-explorer-*.x86_64.rpm` |
 
+## Installing and running on Linux
+
+The Linux build ships in three formats, all for x86-64 (amd64).
+
+### AppImage (portable — recommended for quick testing)
+
+No installation required. It bundles its own GTK/WebKit, so it runs on most
+distributions without installing extra system packages:
+
+```bash
+chmod +x ssh-file-explorer_0.1.0_amd64.AppImage
+./ssh-file-explorer_0.1.0_amd64.AppImage
+```
+
+### Debian / Ubuntu (.deb)
+
+```bash
+sudo apt install ./ssh-file-explorer_0.1.0_amd64.deb
+```
+
+The package declares its runtime dependencies (`libwebkit2gtk-4.1-0`,
+`libgtk-3-0`), which `apt` installs automatically. It registers a desktop menu
+entry under the *Utility* category.
+
+### Fedora / RHEL / openSUSE (.rpm)
+
+```bash
+sudo dnf install ./ssh-file-explorer-0.1.0-1.x86_64.rpm
+```
+
+### Linux runtime requirements
+
+- **WebKitGTK 4.1** (`libwebkit2gtk-4.1-0`) and **GTK 3** — required by the
+  `.deb`/`.rpm` (resolved automatically by the package manager) and bundled
+  inside the AppImage.
+- **A Secret Service provider** (GNOME Keyring or KWallet) — only needed if you
+  want the app to remember saved-connection passwords (see
+  [Security & credential storage](#security--credential-storage)). The app runs
+  fine without one; it simply cannot store passwords.
+
+### Platform differences
+
+- **Drag files out to the desktop:** the native drag-onto-the-desktop drop is
+  Windows-only (it relies on Windows OLE). On Linux, the same
+  drag-toward-the-window-edge gesture instead opens a save-folder dialog and
+  downloads the selection there. Every other feature is identical across
+  platforms. Right-click → **Download** is always available as well.
+
+## Security & credential storage
+
+The app never writes connection passwords to its own files. Saved passwords are
+handed to the operating system's native secret store via the
+[`keyring`](https://crates.io/crates/keyring) crate:
+
+| Platform | Secret store |
+|----------|--------------|
+| Windows  | Windows Credential Manager |
+| macOS    | Keychain |
+| Linux    | Secret Service API (GNOME Keyring / KWallet) over D-Bus |
+
+- **Connection metadata** (label, host, port, username) is stored in
+  `connections.json` in the app config directory. The password field is never
+  serialized to this file.
+- **Saved passwords** live only in the OS secret store, encrypted at rest and
+  unlocked by your login session.
+- **The sudo password** entered at login is held in memory for the session
+  only — it is never written to disk or to the secret store.
+
+On Linux, if no Secret Service provider is running (common on minimal or
+headless setups), saving or loading a stored password will fail; install and
+start `gnome-keyring` or `kwallet` to enable it.
+
 ## Project structure
 
 ```
