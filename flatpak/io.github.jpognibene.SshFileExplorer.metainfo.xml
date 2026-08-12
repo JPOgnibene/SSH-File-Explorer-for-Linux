@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.jpognibene.SshFileExplorer</id>
+
+  <!-- License of THIS metadata file (Flathub requires a permissive one). -->
+  <metadata_license>CC0-1.0</metadata_license>
+  <!--
+    License of the application itself. The repository currently ships no LICENSE
+    file, so this reflects "all rights reserved". If you add an open-source
+    license, change this to its SPDX identifier (e.g. MIT, Apache-2.0, GPL-3.0).
+  -->
+  <project_license>LicenseRef-proprietary</project_license>
+
+  <name>SSH File Explorer</name>
+  <summary>Browse and manage remote Linux files over SSH</summary>
+
+  <description>
+    <p>
+      A native desktop app for browsing and managing files on remote Linux
+      machines over SSH. Connect with a password or key, then upload, download,
+      copy, paste, rename, and edit files as if they were local.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Interactive file browser with search, breadcrumbs, and multi-select</li>
+      <li>Uploads, downloads, and copy/paste with real-time progress</li>
+      <li>Sudo support with automatic retry for protected files</li>
+      <li>Built-in text editor with syntax highlighting</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.jpognibene.SshFileExplorer.desktop</launchable>
+
+  <url type="homepage">https://github.com/JPOgnibene/SSH-File-Explorer-for-Linux</url>
+  <url type="bugtracker">https://github.com/JPOgnibene/SSH-File-Explorer-for-Linux/issues</url>
+
+  <developer id="io.github.jpognibene">
+    <name>JPOgnibene</name>
+  </developer>
+
+  <!-- No mature/objectionable content. -->
+  <content_rating type="oars-1.1" />
+
+  <!--
+    Flathub submission additionally requires at least one screenshot here, e.g.:
+    <screenshots>
+      <screenshot type="default">
+        <image>https://raw.githubusercontent.com/.../screenshot.png</image>
+      </screenshot>
+    </screenshots>
+  -->
+
+  <releases>
+    <release version="0.1.0" date="2026-08-12"/>
+  </releases>
+</component>

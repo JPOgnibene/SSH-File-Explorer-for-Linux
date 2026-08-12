@@ -1,0 +1,56 @@
+# Flatpak manifest for SSH File Explorer.
+#
+# This builds the Flatpak from the .deb that `npm run tauri build` produces,
+# instead of compiling from source inside the sandbox. Use ./build.sh (it copies
+# the freshly built .deb next to this manifest as `ssh-file-explorer.deb` and
+# runs flatpak-builder), or build manually — see the README's Flatpak section.
+#
+# The Flatpak app ID differs from the Tauri identifier (com.jp.ssh-file-explorer)
+# because Flatpak / D-Bus IDs may not contain hyphens. The Tauri identifier — and
+# therefore where saved connections are stored — is unchanged; only the .desktop,
+# icon, and metainfo files are renamed to this app ID.
+id: io.github.jpognibene.SshFileExplorer
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+command: ssh-file-explorer
+
+finish-args:
+  # Remote connections over SSH.
+  - --share=network
+  - --share=ipc
+  # GUI (Wayland with X11 fallback) and GPU acceleration.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Read/write local files for uploads and downloads, and discover ~/.ssh keys.
+  - --filesystem=home
+  # Store saved-connection passwords in the OS keyring (Secret Service).
+  - --talk-name=org.freedesktop.secrets
+
+modules:
+  - name: ssh-file-explorer
+    buildsystem: simple
+    sources:
+      - type: file
+        path: ssh-file-explorer.deb
+      - type: file
+        path: io.github.jpognibene.SshFileExplorer.metainfo.xml
+    build-commands:
+      # Unpack the Debian package (an ar archive containing data.tar.gz).
+      - ar x ssh-file-explorer.deb
+      - tar -xf data.tar.gz
+      # Binary.
+      - install -Dm755 usr/bin/ssh-file-explorer /app/bin/ssh-file-explorer
+      # Desktop entry, renamed to the Flatpak app ID with a matching icon name.
+      - install -Dm644 usr/share/applications/ssh-file-explorer.desktop /app/share/applications/io.github.jpognibene.SshFileExplorer.desktop
+      - desktop-file-edit --set-icon=io.github.jpognibene.SshFileExplorer /app/share/applications/io.github.jpognibene.SshFileExplorer.desktop
+      # Icons — rename each available size to the app ID.
+      - |
+        for size in 32x32 128x128 256x256@2; do
+          src="usr/share/icons/hicolor/$size/apps/ssh-file-explorer.png"
+          [ -f "$src" ] && install -Dm644 "$src" \
+            "/app/share/icons/hicolor/$size/apps/io.github.jpognibene.SshFileExplorer.png"
+        done
+      # AppStream metadata.
+      - install -Dm644 io.github.jpognibene.SshFileExplorer.metainfo.xml /app/share/metainfo/io.github.jpognibene.SshFileExplorer.metainfo.xml

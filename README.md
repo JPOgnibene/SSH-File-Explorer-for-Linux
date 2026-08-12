@@ -127,6 +127,41 @@ sudo dnf install ./ssh-file-explorer-0.1.0-1.x86_64.rpm
   [Security & credential storage](#security--credential-storage)). The app runs
   fine without one; it simply cannot store passwords.
 
+### Flatpak
+
+A Flatpak manifest is provided in [`flatpak/`](flatpak/) for easy installation on
+distributions like Linux Mint. It builds from the `.deb` above rather than from
+source. Because Flatpak/D-Bus app IDs cannot contain hyphens, the Flatpak uses
+the ID `io.github.jpognibene.SshFileExplorer`; the app's Tauri identifier (and
+where it stores saved connections) is unchanged.
+
+One-time setup:
+
+```bash
+sudo apt install flatpak-builder   # or: flatpak install flathub org.flatpak.Builder
+flatpak install flathub org.gnome.Platform//47 org.gnome.Sdk//47
+```
+
+Build and install (after `npm run tauri build` has produced the `.deb`):
+
+```bash
+cd flatpak
+./build.sh            # build and install for the current user
+./build.sh --bundle   # also export a shareable single-file .flatpak
+```
+
+Then launch it:
+
+```bash
+flatpak run io.github.jpognibene.SshFileExplorer
+```
+
+The sandbox is granted network access (SSH), your home directory (uploads,
+downloads, and `~/.ssh` key discovery), and `org.freedesktop.secrets` (so saved
+passwords work via the OS keyring). Publishing to Flathub is a separate step that
+additionally requires screenshots and an SPDX project license in the metainfo
+file.
+
 ### Platform differences
 
 - **Drag files out to the desktop:** the native drag-onto-the-desktop drop is
