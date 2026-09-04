@@ -33,6 +33,11 @@ build-options:
   append-path: /usr/lib/sdk/node20/bin:/usr/lib/sdk/rust-stable/bin
   env:
     CARGO_HOME: /run/build/ssh-file-explorer/cargo
+    # Point npm and tool caches at the offline stores populated by
+    # node-sources.json (module build dir is /run/build/<module name>).
+    XDG_CACHE_HOME: /run/build/ssh-file-explorer/flatpak-node/cache
+    npm_config_cache: /run/build/ssh-file-explorer/flatpak-node/npm-cache
+    npm_config_offline: 'true'
 
 modules:
   - name: ssh-file-explorer
