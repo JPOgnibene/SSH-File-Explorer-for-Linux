@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SSH File Explorer
+Comment=Browse and manage remote Linux files over SSH
+Exec=ssh-file-explorer
+Icon=io.github.jpognibene.SshFileExplorer
+Terminal=false
+Categories=Utility;Network;FileTransfer;
+Keywords=SSH;SFTP;Remote;Files;Transfer;

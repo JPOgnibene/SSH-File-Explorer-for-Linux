@@ -4,12 +4,8 @@
 
   <!-- License of THIS metadata file (Flathub requires a permissive one). -->
   <metadata_license>CC0-1.0</metadata_license>
-  <!--
-    License of the application itself. The repository currently ships no LICENSE
-    file, so this reflects "all rights reserved". If you add an open-source
-    license, change this to its SPDX identifier (e.g. MIT, Apache-2.0, GPL-3.0).
-  -->
-  <project_license>LicenseRef-proprietary</project_license>
+  <!-- SPDX identifier of the application's license (see LICENSE). -->
+  <project_license>MIT</project_license>
 
   <name>SSH File Explorer</name>
   <summary>Browse and manage remote Linux files over SSH</summary>

@@ -4,6 +4,19 @@ A native desktop app for browsing and managing files on remote Linux machines ov
 
 Built with [Tauri v2](https://v2.tauri.app/) (Rust backend) and React + TypeScript + Tailwind CSS (frontend).
 
+## Download
+
+Prebuilt binaries for each release are published on the
+[Releases page](https://github.com/JPOgnibene/SSH-File-Explorer-for-Linux/releases).
+
+- **Windows:** the `.msi` or NSIS `-setup.exe` installer.
+- **Linux:** the `.AppImage` (portable — `chmod +x` and run), or the `.deb` /
+  `.rpm` to install with your package manager. See
+  [Installing and running on Linux](#installing-and-running-on-linux) for
+  details, and [Flatpak](#flatpak) for a sandboxed install.
+
+To build it yourself instead, see [Build from source](#build-from-source).
+
 ## Features
 
 ### Connection
@@ -210,4 +223,9 @@ ssh-file-explorer/
     Cargo.toml         # Rust dependencies
     tauri.conf.json    # Tauri app configuration
   package.json         # Frontend dependencies
+flatpak/               # Flatpak manifest, metainfo, and build script
 ```
+
+## License
+
+Released under the [MIT License](LICENSE).
