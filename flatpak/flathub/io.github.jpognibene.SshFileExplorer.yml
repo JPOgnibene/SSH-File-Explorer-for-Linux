@@ -40,8 +40,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/JPOgnibene/SSH-File-Explorer-for-Linux.git
-        tag: v0.1.0
-        # commit: <REQUIRED by Flathub — the exact SHA that v0.1.0 points to>
+        tag: v1.1.0
+        # commit: <REQUIRED by Flathub — the exact SHA that v1.1.0 points to>
 
       # Generated offline dependency lists — produced by the tools in
       # ../FLATHUB.md. Keep these regenerated whenever the lockfiles change.
