@@ -13,7 +13,7 @@ below and a local test build before it will pass Flathub CI.
 
 ## Prerequisites
 
-- A tagged release (e.g. `v1.1.0`) so the manifest can pin a `commit`.
+- A tagged release (e.g. `v1.2.0`) so the manifest can pin a `commit`.
 - These SDK extensions installed for local test builds:
 
   ```bash
@@ -53,7 +53,7 @@ Both files are regenerated whenever the corresponding lockfile changes.
 Set `commit:` in the manifest to the exact SHA the release tag points to:
 
 ```bash
-git rev-list -n 1 v1.1.0
+git rev-list -n 1 v1.2.0
 ```
 
 ## 3. Test-build locally

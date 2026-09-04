@@ -38,6 +38,17 @@ async function defaultSaveDir(): Promise<string | undefined> {
   }
 }
 
+// A pending host-key decision surfaced by the backend before authenticating.
+interface HostKeyPrompt {
+  kind: "unknown" | "mismatch";
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprint: string;
+  oldFingerprint?: string;
+  retry: () => Promise<void>;
+}
+
 interface FileEntry {
   name: string;
   is_dir: boolean;
@@ -113,6 +124,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState("");
+  const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt | null>(null);
 
   const [host, setHost] = useState("");
   const [port, setPort] = useState("22");
@@ -587,6 +599,46 @@ function App() {
     };
   }, [isDraggingInternal, dropTarget]);
 
+  // Turn a HOST_KEY_UNKNOWN / HOST_KEY_MISMATCH backend error into a prompt.
+  // Returns true if it handled the error (so the caller skips setError).
+  const handleHostKeyError = (
+    e: unknown,
+    h: string,
+    p: number,
+    retry: () => Promise<void>,
+  ): boolean => {
+    const s = String(e);
+    if (s.startsWith("HOST_KEY_UNKNOWN|")) {
+      const [, algorithm, fingerprint] = s.split("|");
+      setHostKeyPrompt({ kind: "unknown", host: h, port: p, algorithm, fingerprint, retry });
+      return true;
+    }
+    if (s.startsWith("HOST_KEY_MISMATCH|")) {
+      const [, algorithm, fingerprint, oldFingerprint] = s.split("|");
+      setHostKeyPrompt({ kind: "mismatch", host: h, port: p, algorithm, fingerprint, oldFingerprint, retry });
+      return true;
+    }
+    return false;
+  };
+
+  // User accepted the host key: persist it, then re-run the connection.
+  const acceptHostKey = async () => {
+    const prompt = hostKeyPrompt;
+    if (!prompt) return;
+    setHostKeyPrompt(null);
+    try {
+      await invoke("trust_host_key", {
+        host: prompt.host,
+        port: prompt.port,
+        algorithm: prompt.algorithm,
+        fingerprint: prompt.fingerprint,
+      });
+      await prompt.retry();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const doConnect = async (h: string, p: number, u: string, pw: string) => {
     setConnecting(true);
     setError("");
@@ -600,7 +652,7 @@ function App() {
       setConnected(true);
       await listFiles("/");
     } catch (e) {
-      setError(String(e));
+      if (!handleHostKeyError(e, h, p, () => doConnect(h, p, u, pw))) setError(String(e));
     } finally {
       setConnecting(false);
     }
@@ -624,7 +676,7 @@ function App() {
       setConnected(true);
       await listFiles("/");
     } catch (e) {
-      setError(String(e));
+      if (!handleHostKeyError(e, h, p, () => doConnectKey(h, p, u, kp, pp))) setError(String(e));
     } finally {
       setConnecting(false);
     }
@@ -1697,6 +1749,56 @@ function App() {
                 className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-500 rounded-lg transition cursor-pointer"
               >
                 Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Host key verification prompt */}
+      {hostKeyPrompt && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-md w-full mx-4 shadow-2xl">
+            {hostKeyPrompt.kind === "unknown" ? (
+              <>
+                <h3 className="text-white font-medium mb-2">Unknown host key</h3>
+                <p className="text-sm text-zinc-400 mb-3">
+                  The authenticity of{" "}
+                  <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
+                  can't be established — this is the first time connecting to this server. Verify the fingerprint below matches the server before trusting it.
+                </p>
+              </>
+            ) : (
+              <>
+                <h3 className="text-red-400 font-medium mb-2">⚠ Host key has changed</h3>
+                <p className="text-sm text-zinc-400 mb-3">
+                  The host key for{" "}
+                  <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
+                  differs from the one you previously trusted. This can mean a man-in-the-middle attack — only continue if you know the server was legitimately changed.
+                </p>
+              </>
+            )}
+            <div className="text-xs font-mono bg-zinc-800 rounded-lg p-3 break-all">
+              <span className="text-zinc-500">{hostKeyPrompt.algorithm}</span>{" "}
+              <span className="text-zinc-200">{hostKeyPrompt.fingerprint}</span>
+            </div>
+            {hostKeyPrompt.kind === "mismatch" && hostKeyPrompt.oldFingerprint && (
+              <div className="text-xs font-mono text-zinc-500 mt-1 break-all">
+                previously trusted: {hostKeyPrompt.oldFingerprint}
+              </div>
+            )}
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setHostKeyPrompt(null)}
+                className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={acceptHostKey}
+                className={`px-4 py-2 text-sm text-white rounded-lg transition cursor-pointer ${hostKeyPrompt.kind === "mismatch" ? "bg-red-600 hover:bg-red-500" : "bg-blue-600 hover:bg-blue-500"}`}
+              >
+                {hostKeyPrompt.kind === "mismatch" ? "Trust new key" : "Trust & connect"}
               </button>
             </div>
           </div>

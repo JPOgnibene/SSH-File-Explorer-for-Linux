@@ -21,6 +21,7 @@ To build it yourself instead, see [Build from source](#build-from-source).
 
 ### Connection
 - **SSH connect/disconnect** with password authentication
+- **Host key verification** — trust-on-first-use: the first time you connect to a server, the app shows its host-key fingerprint for you to confirm, then remembers it. If a trusted server's key ever changes, the app warns and blocks the connection (a possible man-in-the-middle) until you explicitly trust the new key
 - **Saved connections** with optional password storage for one-click reconnect
 - **Sudo password support** — provide an optional sudo password at login for elevated file operations on protected directories
 
@@ -110,14 +111,14 @@ No installation required. It bundles its own GTK/WebKit, so it runs on most
 distributions without installing extra system packages:
 
 ```bash
-chmod +x ssh-file-explorer_1.1.0_amd64.AppImage
-./ssh-file-explorer_1.1.0_amd64.AppImage
+chmod +x ssh-file-explorer_1.2.0_amd64.AppImage
+./ssh-file-explorer_1.2.0_amd64.AppImage
 ```
 
 ### Debian / Ubuntu (.deb)
 
 ```bash
-sudo apt install ./ssh-file-explorer_1.1.0_amd64.deb
+sudo apt install ./ssh-file-explorer_1.2.0_amd64.deb
 ```
 
 The package declares its runtime dependencies (`libwebkit2gtk-4.1-0`,
@@ -127,7 +128,7 @@ entry under the *Utility* category.
 ### Fedora / RHEL / openSUSE (.rpm)
 
 ```bash
-sudo dnf install ./ssh-file-explorer-1.1.0-1.x86_64.rpm
+sudo dnf install ./ssh-file-explorer-1.2.0-1.x86_64.rpm
 ```
 
 ### Linux runtime requirements
@@ -202,6 +203,8 @@ handed to the operating system's native secret store via the
   unlocked by your login session.
 - **The sudo password** entered at login is held in memory for the session
   only — it is never written to disk or to the secret store.
+- **Trusted host keys** are recorded (as fingerprints, per `host:port`) in
+  `known_hosts.json` in the app config directory, and checked on every connect.
 
 On Linux, if no Secret Service provider is running (common on minimal or
 headless setups), saving or loading a stored password will fail; install and
