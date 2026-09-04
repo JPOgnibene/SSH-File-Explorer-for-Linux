@@ -25,15 +25,34 @@ pub(crate) struct SshState {
     pub(crate) sftp: Option<russh_sftp::client::SftpSession>,
 }
 
-pub(crate) struct ClientHandler;
+pub(crate) struct ClientHandler {
+    captured_key: Arc<std::sync::Mutex<Option<CapturedHostKey>>>,
+}
+
+#[derive(Clone)]
+struct CapturedHostKey {
+    algorithm: String,
+    fingerprint: String,
+}
 
 impl russh::client::Handler for ClientHandler {
     type Error = russh::Error;
 
     fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+        // Record the presented host key so the connect command can verify it
+        // against the known-hosts store *before* any credentials are sent. We
+        // accept at the transport layer (Ok(true)); the caller tears the session
+        // down without authenticating if the key is unknown or has changed.
+        let captured = CapturedHostKey {
+            algorithm: server_public_key.algorithm().to_string(),
+            fingerprint: server_public_key.fingerprint(Default::default()).to_string(),
+        };
+        if let Ok(mut slot) = self.captured_key.lock() {
+            *slot = Some(captured);
+        }
         async { Ok(true) }
     }
 }
@@ -103,6 +122,66 @@ fn write_connections(app: &AppHandle, connections: &[SavedConnection]) -> Result
     let path = connections_path(app)?;
     let data = serde_json::to_string_pretty(connections).map_err(|e| format!("Failed to serialize: {}", e))?;
     std::fs::write(&path, data).map_err(|e| format!("Failed to write connections: {}", e))
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct KnownHost {
+    algorithm: String,
+    fingerprint: String,
+}
+
+fn known_hosts_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Failed to get config dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    Ok(dir.join("known_hosts.json"))
+}
+
+fn read_known_hosts(app: &AppHandle) -> Result<std::collections::HashMap<String, KnownHost>, String> {
+    let path = known_hosts_path(app)?;
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let data = std::fs::read_to_string(&path).map_err(|e| format!("Failed to read known_hosts: {}", e))?;
+    serde_json::from_str(&data).map_err(|e| format!("Failed to parse known_hosts: {}", e))
+}
+
+fn write_known_hosts(app: &AppHandle, hosts: &std::collections::HashMap<String, KnownHost>) -> Result<(), String> {
+    let path = known_hosts_path(app)?;
+    let data = serde_json::to_string_pretty(hosts).map_err(|e| format!("Failed to serialize: {}", e))?;
+    std::fs::write(&path, data).map_err(|e| format!("Failed to write known_hosts: {}", e))
+}
+
+/// Verify a captured host key against the known-hosts store. Returns a machine-
+/// readable error the frontend parses: `HOST_KEY_UNKNOWN|algo|fp` for a host we
+/// have never trusted, or `HOST_KEY_MISMATCH|algo|new_fp|old_fp` when the key
+/// differs from the one we stored (a possible man-in-the-middle).
+fn verify_host_key(app: &AppHandle, host: &str, port: u16, captured: &CapturedHostKey) -> Result<(), String> {
+    let hosts = read_known_hosts(app)?;
+    let key = format!("{}:{}", host, port);
+    match hosts.get(&key) {
+        None => Err(format!("HOST_KEY_UNKNOWN|{}|{}", captured.algorithm, captured.fingerprint)),
+        Some(existing) if existing.fingerprint == captured.fingerprint => Ok(()),
+        Some(existing) => Err(format!(
+            "HOST_KEY_MISMATCH|{}|{}|{}",
+            captured.algorithm, captured.fingerprint, existing.fingerprint
+        )),
+    }
+}
+
+#[tauri::command]
+async fn trust_host_key(
+    app: AppHandle,
+    host: String,
+    port: u16,
+    algorithm: String,
+    fingerprint: String,
+) -> Result<(), String> {
+    let mut hosts = read_known_hosts(&app)?;
+    hosts.insert(format!("{}:{}", host, port), KnownHost { algorithm, fingerprint });
+    write_known_hosts(&app, &hosts)
 }
 
 #[tauri::command]
@@ -251,6 +330,7 @@ async fn discover_ssh_keys() -> Result<Vec<SshKeyInfo>, String> {
 
 #[tauri::command]
 async fn ssh_connect(
+    app: AppHandle,
     host: String,
     port: u16,
     username: String,
@@ -258,12 +338,23 @@ async fn ssh_connect(
     state: State<'_, SshSession>,
 ) -> Result<(), String> {
     let config = Arc::new(russh::client::Config::default());
-    let handler = ClientHandler;
+    let captured_key = Arc::new(std::sync::Mutex::new(None));
+    let handler = ClientHandler { captured_key: captured_key.clone() };
 
-    let mut session = russh::client::connect(config, (host.as_str(), port), handler)
+    let session = russh::client::connect(config, (host.as_str(), port), handler)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
+    // Verify the host key before authenticating. On an unknown or changed key
+    // this returns early and the session is dropped, so no credentials are sent.
+    let captured = captured_key
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Server did not present a host key")?;
+    verify_host_key(&app, &host, port, &captured)?;
+
+    let mut session = session;
     let auth_ok = session
         .authenticate_password(&username, &password)
         .await
@@ -285,6 +376,7 @@ async fn ssh_connect(
 
 #[tauri::command]
 async fn ssh_connect_key(
+    app: AppHandle,
     host: String,
     port: u16,
     username: String,
@@ -299,12 +391,22 @@ async fn ssh_connect_key(
         .map_err(|e| format!("Failed to decode key: {}", e))?;
 
     let config = Arc::new(russh::client::Config::default());
-    let handler = ClientHandler;
+    let captured_key = Arc::new(std::sync::Mutex::new(None));
+    let handler = ClientHandler { captured_key: captured_key.clone() };
 
-    let mut session = russh::client::connect(config, (host.as_str(), port), handler)
+    let session = russh::client::connect(config, (host.as_str(), port), handler)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
+    // Verify the host key before authenticating (see ssh_connect).
+    let captured = captured_key
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Server did not present a host key")?;
+    verify_host_key(&app, &host, port, &captured)?;
+
+    let mut session = session;
     let key_with_alg = russh::keys::PrivateKeyWithHashAlg::new(
         Arc::new(key_pair),
         None,
@@ -1867,6 +1969,7 @@ pub fn run() {
             discover_ssh_keys,
             ssh_connect,
             ssh_connect_key,
+            trust_host_key,
             ssh_disconnect,
             check_writable,
             check_sudo_writable,
