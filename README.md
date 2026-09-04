@@ -110,14 +110,14 @@ No installation required. It bundles its own GTK/WebKit, so it runs on most
 distributions without installing extra system packages:
 
 ```bash
-chmod +x ssh-file-explorer_0.1.0_amd64.AppImage
-./ssh-file-explorer_0.1.0_amd64.AppImage
+chmod +x ssh-file-explorer_1.1.0_amd64.AppImage
+./ssh-file-explorer_1.1.0_amd64.AppImage
 ```
 
 ### Debian / Ubuntu (.deb)
 
 ```bash
-sudo apt install ./ssh-file-explorer_0.1.0_amd64.deb
+sudo apt install ./ssh-file-explorer_1.1.0_amd64.deb
 ```
 
 The package declares its runtime dependencies (`libwebkit2gtk-4.1-0`,
@@ -127,7 +127,7 @@ entry under the *Utility* category.
 ### Fedora / RHEL / openSUSE (.rpm)
 
 ```bash
-sudo dnf install ./ssh-file-explorer-0.1.0-1.x86_64.rpm
+sudo dnf install ./ssh-file-explorer-1.1.0-1.x86_64.rpm
 ```
 
 ### Linux runtime requirements
