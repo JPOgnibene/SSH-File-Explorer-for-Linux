@@ -549,11 +549,16 @@ function App() {
 
     const handleMouseMove = (e: MouseEvent) => {
       if (!internalDragRef.current || oleDragActiveRef.current) return;
-      const atEdge = e.clientX <= 0 || e.clientY <= 0 ||
-          e.clientX >= window.innerWidth - 1 || e.clientY >= window.innerHeight - 1;
-      if (atEdge) {
-        startOleDrag();
-        return;
+      // Dragging files out to the desktop is Windows-only (native OLE drag).
+      // On other platforms, use the Download button / right-click → Download
+      // instead; the edge gesture does nothing here.
+      if (IS_WINDOWS) {
+        const atEdge = e.clientX <= 0 || e.clientY <= 0 ||
+            e.clientX >= window.innerWidth - 1 || e.clientY >= window.innerHeight - 1;
+        if (atEdge) {
+          startOleDrag();
+          return;
+        }
       }
       const el = document.elementFromPoint(e.clientX, e.clientY);
       const row = el?.closest('tr[data-folder]');
@@ -1056,12 +1061,6 @@ function App() {
   };
 
   const handleDragOut = async (file: FileEntry): Promise<string> => {
-    if (!IS_WINDOWS) {
-      // No native drag-to-desktop on this platform: reuse the download flow,
-      // which prompts for a destination and streams the file(s) there.
-      await handleDownload(file);
-      return "done";
-    }
     const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setTransfers(prev => [...prev, { id: transferId, type: 'download', fileName: file.name, bytesTransferred: 0, totalBytes: file.size }]);
@@ -1088,10 +1087,6 @@ function App() {
   };
 
   const handleMultiDragOut = async (targets: FileEntry[]): Promise<string> => {
-    if (!IS_WINDOWS) {
-      await handleMultiDownload(targets);
-      return "done";
-    }
     const transferId = `drag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const totalSize = targets.reduce((sum, f) => sum + f.size, 0);
     const label = `${targets.length} items`;

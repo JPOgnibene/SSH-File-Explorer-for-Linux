@@ -29,7 +29,7 @@ Built with [Tauri v2](https://v2.tauri.app/) (Rust backend) and React + TypeScri
 ### Transfers
 - **Upload files and folders** from your local machine to the remote server
 - **Download files and folders** from the remote server to your local machine
-- **Drag files out** — on **Windows**, drag files directly onto your desktop or into other applications; on **Linux/macOS**, the same drag-toward-the-edge gesture opens a save-folder dialog and downloads the selection
+- **Drag files out to the desktop** (**Windows only**) — drag files directly onto your desktop or into other applications. On Linux/macOS, use **Download** (toolbar or right-click) instead
 - **Drag and drop upload** — drag files from your desktop into the app to upload them
 - **Real-time progress bars** for all transfers (uploads, downloads, and copies) with cancel support
 
@@ -165,10 +165,10 @@ file.
 ### Platform differences
 
 - **Drag files out to the desktop:** the native drag-onto-the-desktop drop is
-  Windows-only (it relies on Windows OLE). On Linux, the same
-  drag-toward-the-window-edge gesture instead opens a save-folder dialog and
-  downloads the selection there. Every other feature is identical across
-  platforms. Right-click → **Download** is always available as well.
+  **Windows-only** (it relies on Windows OLE). On Linux/macOS this gesture is
+  disabled; download files with the **Download** button in the toolbar or via
+  right-click → **Download**, which prompts for a destination folder. Every
+  other feature is identical across platforms.
 
 ## Security & credential storage
 
