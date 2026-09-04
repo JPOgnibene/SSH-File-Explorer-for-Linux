@@ -1,0 +1,68 @@
+# ============================================================================
+# DRAFT Flathub (build-from-source) manifest — NOT yet test-built.
+#
+# Flathub builds apps from source in a NETWORK-ISOLATED sandbox, so every
+# dependency must be vendored offline via generated source lists
+# (cargo-sources.json and node-sources.json). This manifest is a correct-shaped
+# starting point; it still needs the generated files (see ../FLATHUB.md) and a
+# local `flatpak-builder` test run to shake out version/path details before
+# submission.
+#
+# For a Flatpak you can build and use *today*, use the from-.deb manifest one
+# directory up (../io.github.jpognibene.SshFileExplorer.yml).
+# ============================================================================
+id: io.github.jpognibene.SshFileExplorer
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node20
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: ssh-file-explorer
+
+finish-args:
+  - --share=network                       # SSH connections
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=home                      # uploads/downloads, ~/.ssh discovery
+  - --talk-name=org.freedesktop.secrets    # keyring (saved passwords)
+
+build-options:
+  append-path: /usr/lib/sdk/node20/bin:/usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/ssh-file-explorer/cargo
+
+modules:
+  - name: ssh-file-explorer
+    buildsystem: simple
+    sources:
+      - type: git
+        url: https://github.com/JPOgnibene/SSH-File-Explorer-for-Linux.git
+        tag: v0.1.0
+        # commit: <REQUIRED by Flathub — the exact SHA that v0.1.0 points to>
+
+      # Generated offline dependency lists — produced by the tools in
+      # ../FLATHUB.md. Keep these regenerated whenever the lockfiles change.
+      - cargo-sources.json
+      - node-sources.json
+
+      # App metadata shipped alongside the manifest in the Flathub repo.
+      - type: file
+        path: io.github.jpognibene.SshFileExplorer.desktop
+      - type: file
+        path: io.github.jpognibene.SshFileExplorer.metainfo.xml
+
+    build-commands:
+      # Frontend (npm deps are vendored offline by node-sources.json).
+      - npm --prefix ssh-file-explorer ci --offline
+      - npm --prefix ssh-file-explorer run build
+      # Rust/Tauri binary (crates vendored offline by cargo-sources.json).
+      - cargo build --release --offline --manifest-path ssh-file-explorer/src-tauri/Cargo.toml
+      - install -Dm755 ssh-file-explorer/src-tauri/target/release/ssh-file-explorer /app/bin/ssh-file-explorer
+      # Desktop entry, icon, and AppStream metadata.
+      - install -Dm644 io.github.jpognibene.SshFileExplorer.desktop /app/share/applications/io.github.jpognibene.SshFileExplorer.desktop
+      - install -Dm644 ssh-file-explorer/src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/io.github.jpognibene.SshFileExplorer.png
+      - install -Dm644 ssh-file-explorer/src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/io.github.jpognibene.SshFileExplorer.png
+      - install -Dm644 io.github.jpognibene.SshFileExplorer.metainfo.xml /app/share/metainfo/io.github.jpognibene.SshFileExplorer.metainfo.xml

@@ -1,0 +1,8 @@
+# Copied in by build.sh from the Tauri build output.
+ssh-file-explorer.deb
+
+# flatpak-builder working directories and outputs.
+.flatpak-builder/
+build/
+repo/
+*.flatpak

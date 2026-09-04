@@ -12,9 +12,31 @@ import { css } from "@codemirror/lang-css";
 import { xml } from "@codemirror/lang-xml";
 import { markdown } from "@codemirror/lang-markdown";
 import { save, open } from "@tauri-apps/plugin-dialog";
+import { downloadDir, homeDir } from "@tauri-apps/api/path";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
+
+// Windows uses a native OLE virtual-file drag source to drop remote files onto
+// the desktop. Other platforms (Linux/macOS) have no equivalent, so the same
+// edge-drag gesture falls back to a save-folder dialog + download.
+const IS_WINDOWS =
+  typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+
+// Preferred starting location for save/download dialogs. Falls back gracefully
+// so a packaged build (e.g. an AppImage) never opens the picker inside its own
+// temporary mount point.
+async function defaultSaveDir(): Promise<string | undefined> {
+  try {
+    return await downloadDir();
+  } catch {
+    try {
+      return await homeDir();
+    } catch {
+      return undefined;
+    }
+  }
+}
 
 interface FileEntry {
   name: string;
@@ -527,11 +549,16 @@ function App() {
 
     const handleMouseMove = (e: MouseEvent) => {
       if (!internalDragRef.current || oleDragActiveRef.current) return;
-      const atEdge = e.clientX <= 0 || e.clientY <= 0 ||
-          e.clientX >= window.innerWidth - 1 || e.clientY >= window.innerHeight - 1;
-      if (atEdge) {
-        startOleDrag();
-        return;
+      // Dragging files out to the desktop is Windows-only (native OLE drag).
+      // On other platforms, use the Download button / right-click → Download
+      // instead; the edge gesture does nothing here.
+      if (IS_WINDOWS) {
+        const atEdge = e.clientX <= 0 || e.clientY <= 0 ||
+            e.clientX >= window.innerWidth - 1 || e.clientY >= window.innerHeight - 1;
+        if (atEdge) {
+          startOleDrag();
+          return;
+        }
       }
       const el = document.elementFromPoint(e.clientX, e.clientY);
       const row = el?.closest('tr[data-folder]');
@@ -983,13 +1010,14 @@ function App() {
     const dir = fromPath || currentPath;
     const remotePath = dir === "/" ? `/${file.name}` : `${dir}/${file.name}`;
     try {
+      const startDir = await defaultSaveDir();
       let localPath: string | null;
       if (file.is_dir) {
-        const selected = await open({ multiple: false, directory: true, title: `Save "${file.name}" to...` });
+        const selected = await open({ multiple: false, directory: true, defaultPath: startDir, title: `Choose a folder to save "${file.name}" into` });
         if (!selected) return;
         localPath = `${String(selected)}${String(selected).endsWith("\\") || String(selected).endsWith("/") ? "" : "/"}${file.name}`;
       } else {
-        localPath = await save({ defaultPath: file.name });
+        localPath = await save({ defaultPath: startDir ? `${startDir}/${file.name}` : file.name, title: `Save "${file.name}" as` });
       }
       if (!localPath) return;
       const transferId = `dl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1009,7 +1037,8 @@ function App() {
   };
 
   const handleMultiDownload = async (targets: FileEntry[]) => {
-    const selected = await open({ multiple: false, directory: true, title: `Save ${targets.length} items to...` });
+    const startDir = await defaultSaveDir();
+    const selected = await open({ multiple: false, directory: true, defaultPath: startDir, title: `Choose a folder to save ${targets.length} items into` });
     if (!selected) return;
     const destDir = String(selected);
     for (const file of targets) {
