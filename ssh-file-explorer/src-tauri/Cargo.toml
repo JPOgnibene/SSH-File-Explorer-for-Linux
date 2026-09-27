@@ -1,6 +1,6 @@
 [package]
 name = "ssh-file-explorer"
-version = "1.2.1"
+version = "1.2.2"
 description = "Browse and manage remote Linux files over SSH"
 authors = ["JPOgnibene"]
 license = "MIT"
