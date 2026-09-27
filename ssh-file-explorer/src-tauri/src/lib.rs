@@ -1956,6 +1956,26 @@ fn get_progress_port() -> u16 {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Work around newer WebKitGTK (e.g. Ubuntu 24.04's 2.46+) rendering a blank
+    // "Could not connect to localhost" page instead of loading the app. Both the
+    // DMABUF renderer and accelerated compositing must be disabled, and the
+    // variables must exist in the environment *before* the process starts —
+    // setting them in-process is too late. So if they aren't set yet, set them
+    // and re-exec ourselves once. Presence of the DMABUF var guards against a
+    // re-exec loop and lets a user opt out by setting it explicitly.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        use std::os::unix::process::CommandExt;
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        if let Ok(exe) = std::env::current_exe() {
+            // exec() only returns if it fails; fall through and run in-process.
+            let _ = std::process::Command::new(exe)
+                .args(std::env::args_os().skip(1))
+                .exec();
+        }
+    }
+
     #[cfg(windows)]
     virtual_drag::init_ole_main_thread();
     #[cfg(windows)]
