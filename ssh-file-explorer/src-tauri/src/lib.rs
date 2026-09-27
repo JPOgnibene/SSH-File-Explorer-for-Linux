@@ -341,9 +341,13 @@ async fn ssh_connect(
     let captured_key = Arc::new(std::sync::Mutex::new(None));
     let handler = ClientHandler { captured_key: captured_key.clone() };
 
-    let session = russh::client::connect(config, (host.as_str(), port), handler)
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+    let session = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        russh::client::connect(config, (host.as_str(), port), handler),
+    )
+    .await
+    .map_err(|_| format!("Connection timed out: could not reach {}:{}", host, port))?
+    .map_err(|e| format!("Connection failed: {}", e))?;
 
     // Verify the host key before authenticating. On an unknown or changed key
     // this returns early and the session is dropped, so no credentials are sent.
@@ -394,9 +398,13 @@ async fn ssh_connect_key(
     let captured_key = Arc::new(std::sync::Mutex::new(None));
     let handler = ClientHandler { captured_key: captured_key.clone() };
 
-    let session = russh::client::connect(config, (host.as_str(), port), handler)
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+    let session = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        russh::client::connect(config, (host.as_str(), port), handler),
+    )
+    .await
+    .map_err(|_| format!("Connection timed out: could not reach {}:{}", host, port))?
+    .map_err(|e| format!("Connection failed: {}", e))?;
 
     // Verify the host key before authenticating (see ssh_connect).
     let captured = captured_key
