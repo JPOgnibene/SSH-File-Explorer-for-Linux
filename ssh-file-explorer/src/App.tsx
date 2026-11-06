@@ -1429,17 +1429,27 @@ function App() {
                   {availableKeys.length > 0 ? (
                     <div>
                       <label className="block text-xs font-medium text-zinc-400 mb-1.5">Private Key</label>
-                      <select
-                        value={selectedKeyPath}
-                        onChange={(e) => setSelectedKeyPath(e.target.value)}
-                        className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition cursor-pointer"
-                      >
-                        {availableKeys.map((k) => (
-                          <option key={k.path} value={k.path}>
-                            {k.name} ({k.key_type}){k.encrypted ? " 🔒" : ""}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="relative">
+                        <select
+                          value={selectedKeyPath}
+                          onChange={(e) => setSelectedKeyPath(e.target.value)}
+                          className="w-full appearance-none [color-scheme:dark] pl-3 pr-10 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition cursor-pointer"
+                        >
+                          {availableKeys.map((k) => (
+                            <option key={k.path} value={k.path} className="bg-zinc-900 text-white">
+                              {k.name} ({k.key_type}){k.encrypted ? " 🔒" : ""}
+                            </option>
+                          ))}
+                        </select>
+                        <svg
+                          className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
                     </div>
                   ) : (
                     <div className="px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-400 text-sm">
