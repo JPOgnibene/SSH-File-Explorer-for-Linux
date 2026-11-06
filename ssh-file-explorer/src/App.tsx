@@ -1249,9 +1249,62 @@ function App() {
 
   const pathSegments = currentPath.split("/").filter(Boolean);
 
+  // Host-key trust dialog. Defined once here so it can be rendered in BOTH the
+  // login view (where it fires during an initial connection, before `connected`
+  // becomes true) and the connected file-browser view.
+  const hostKeyModal = hostKeyPrompt && (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+      <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-md w-full mx-4 shadow-2xl">
+        {hostKeyPrompt.kind === "unknown" ? (
+          <>
+            <h3 className="text-white font-medium mb-2">Unknown host key</h3>
+            <p className="text-sm text-zinc-400 mb-3">
+              The authenticity of{" "}
+              <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
+              can't be established — this is the first time connecting to this server. Verify the fingerprint below matches the server before trusting it.
+            </p>
+          </>
+        ) : (
+          <>
+            <h3 className="text-red-400 font-medium mb-2">⚠ Host key has changed</h3>
+            <p className="text-sm text-zinc-400 mb-3">
+              The host key for{" "}
+              <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
+              differs from the one you previously trusted. This can mean a man-in-the-middle attack — only continue if you know the server was legitimately changed.
+            </p>
+          </>
+        )}
+        <div className="text-xs font-mono bg-zinc-800 rounded-lg p-3 break-all">
+          <span className="text-zinc-500">{hostKeyPrompt.algorithm}</span>{" "}
+          <span className="text-zinc-200">{hostKeyPrompt.fingerprint}</span>
+        </div>
+        {hostKeyPrompt.kind === "mismatch" && hostKeyPrompt.oldFingerprint && (
+          <div className="text-xs font-mono text-zinc-500 mt-1 break-all">
+            previously trusted: {hostKeyPrompt.oldFingerprint}
+          </div>
+        )}
+        <div className="flex justify-end gap-2 mt-4">
+          <button
+            onClick={() => setHostKeyPrompt(null)}
+            className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={acceptHostKey}
+            className={`px-4 py-2 text-sm text-white rounded-lg transition cursor-pointer ${hostKeyPrompt.kind === "mismatch" ? "bg-red-600 hover:bg-red-500" : "bg-blue-600 hover:bg-blue-500"}`}
+          >
+            {hostKeyPrompt.kind === "mismatch" ? "Trust new key" : "Trust & connect"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   if (!connected) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4" onContextMenu={(e) => e.preventDefault()}>
+        {hostKeyModal}
         <div className={`flex items-stretch gap-6 w-full ${savedConnections.length > 0 ? "max-w-3xl" : "max-w-md"}`}>
 
           {/* Saved connections panel */}
@@ -1376,17 +1429,27 @@ function App() {
                   {availableKeys.length > 0 ? (
                     <div>
                       <label className="block text-xs font-medium text-zinc-400 mb-1.5">Private Key</label>
-                      <select
-                        value={selectedKeyPath}
-                        onChange={(e) => setSelectedKeyPath(e.target.value)}
-                        className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition cursor-pointer"
-                      >
-                        {availableKeys.map((k) => (
-                          <option key={k.path} value={k.path}>
-                            {k.name} ({k.key_type}){k.encrypted ? " 🔒" : ""}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="relative">
+                        <select
+                          value={selectedKeyPath}
+                          onChange={(e) => setSelectedKeyPath(e.target.value)}
+                          className="w-full appearance-none [color-scheme:dark] pl-3 pr-10 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition cursor-pointer"
+                        >
+                          {availableKeys.map((k) => (
+                            <option key={k.path} value={k.path} className="bg-zinc-900 text-white">
+                              {k.name} ({k.key_type}){k.encrypted ? " 🔒" : ""}
+                            </option>
+                          ))}
+                        </select>
+                        <svg
+                          className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
                     </div>
                   ) : (
                     <div className="px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-400 text-sm">
@@ -1756,54 +1819,7 @@ function App() {
       )}
 
       {/* Host key verification prompt */}
-      {hostKeyPrompt && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-md w-full mx-4 shadow-2xl">
-            {hostKeyPrompt.kind === "unknown" ? (
-              <>
-                <h3 className="text-white font-medium mb-2">Unknown host key</h3>
-                <p className="text-sm text-zinc-400 mb-3">
-                  The authenticity of{" "}
-                  <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
-                  can't be established — this is the first time connecting to this server. Verify the fingerprint below matches the server before trusting it.
-                </p>
-              </>
-            ) : (
-              <>
-                <h3 className="text-red-400 font-medium mb-2">⚠ Host key has changed</h3>
-                <p className="text-sm text-zinc-400 mb-3">
-                  The host key for{" "}
-                  <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
-                  differs from the one you previously trusted. This can mean a man-in-the-middle attack — only continue if you know the server was legitimately changed.
-                </p>
-              </>
-            )}
-            <div className="text-xs font-mono bg-zinc-800 rounded-lg p-3 break-all">
-              <span className="text-zinc-500">{hostKeyPrompt.algorithm}</span>{" "}
-              <span className="text-zinc-200">{hostKeyPrompt.fingerprint}</span>
-            </div>
-            {hostKeyPrompt.kind === "mismatch" && hostKeyPrompt.oldFingerprint && (
-              <div className="text-xs font-mono text-zinc-500 mt-1 break-all">
-                previously trusted: {hostKeyPrompt.oldFingerprint}
-              </div>
-            )}
-            <div className="flex justify-end gap-2 mt-4">
-              <button
-                onClick={() => setHostKeyPrompt(null)}
-                className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={acceptHostKey}
-                className={`px-4 py-2 text-sm text-white rounded-lg transition cursor-pointer ${hostKeyPrompt.kind === "mismatch" ? "bg-red-600 hover:bg-red-500" : "bg-blue-600 hover:bg-blue-500"}`}
-              >
-                {hostKeyPrompt.kind === "mismatch" ? "Trust new key" : "Trust & connect"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {hostKeyModal}
 
       {/* Main content area */}
       <div className="flex-1 flex min-h-0">
