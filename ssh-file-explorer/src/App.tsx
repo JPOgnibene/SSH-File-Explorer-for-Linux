@@ -1249,9 +1249,62 @@ function App() {
 
   const pathSegments = currentPath.split("/").filter(Boolean);
 
+  // Host-key trust dialog. Defined once here so it can be rendered in BOTH the
+  // login view (where it fires during an initial connection, before `connected`
+  // becomes true) and the connected file-browser view.
+  const hostKeyModal = hostKeyPrompt && (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+      <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-md w-full mx-4 shadow-2xl">
+        {hostKeyPrompt.kind === "unknown" ? (
+          <>
+            <h3 className="text-white font-medium mb-2">Unknown host key</h3>
+            <p className="text-sm text-zinc-400 mb-3">
+              The authenticity of{" "}
+              <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
+              can't be established — this is the first time connecting to this server. Verify the fingerprint below matches the server before trusting it.
+            </p>
+          </>
+        ) : (
+          <>
+            <h3 className="text-red-400 font-medium mb-2">⚠ Host key has changed</h3>
+            <p className="text-sm text-zinc-400 mb-3">
+              The host key for{" "}
+              <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
+              differs from the one you previously trusted. This can mean a man-in-the-middle attack — only continue if you know the server was legitimately changed.
+            </p>
+          </>
+        )}
+        <div className="text-xs font-mono bg-zinc-800 rounded-lg p-3 break-all">
+          <span className="text-zinc-500">{hostKeyPrompt.algorithm}</span>{" "}
+          <span className="text-zinc-200">{hostKeyPrompt.fingerprint}</span>
+        </div>
+        {hostKeyPrompt.kind === "mismatch" && hostKeyPrompt.oldFingerprint && (
+          <div className="text-xs font-mono text-zinc-500 mt-1 break-all">
+            previously trusted: {hostKeyPrompt.oldFingerprint}
+          </div>
+        )}
+        <div className="flex justify-end gap-2 mt-4">
+          <button
+            onClick={() => setHostKeyPrompt(null)}
+            className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={acceptHostKey}
+            className={`px-4 py-2 text-sm text-white rounded-lg transition cursor-pointer ${hostKeyPrompt.kind === "mismatch" ? "bg-red-600 hover:bg-red-500" : "bg-blue-600 hover:bg-blue-500"}`}
+          >
+            {hostKeyPrompt.kind === "mismatch" ? "Trust new key" : "Trust & connect"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   if (!connected) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4" onContextMenu={(e) => e.preventDefault()}>
+        {hostKeyModal}
         <div className={`flex items-stretch gap-6 w-full ${savedConnections.length > 0 ? "max-w-3xl" : "max-w-md"}`}>
 
           {/* Saved connections panel */}
@@ -1756,54 +1809,7 @@ function App() {
       )}
 
       {/* Host key verification prompt */}
-      {hostKeyPrompt && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-5 max-w-md w-full mx-4 shadow-2xl">
-            {hostKeyPrompt.kind === "unknown" ? (
-              <>
-                <h3 className="text-white font-medium mb-2">Unknown host key</h3>
-                <p className="text-sm text-zinc-400 mb-3">
-                  The authenticity of{" "}
-                  <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
-                  can't be established — this is the first time connecting to this server. Verify the fingerprint below matches the server before trusting it.
-                </p>
-              </>
-            ) : (
-              <>
-                <h3 className="text-red-400 font-medium mb-2">⚠ Host key has changed</h3>
-                <p className="text-sm text-zinc-400 mb-3">
-                  The host key for{" "}
-                  <span className="text-zinc-200 font-medium">{hostKeyPrompt.host}:{hostKeyPrompt.port}</span>{" "}
-                  differs from the one you previously trusted. This can mean a man-in-the-middle attack — only continue if you know the server was legitimately changed.
-                </p>
-              </>
-            )}
-            <div className="text-xs font-mono bg-zinc-800 rounded-lg p-3 break-all">
-              <span className="text-zinc-500">{hostKeyPrompt.algorithm}</span>{" "}
-              <span className="text-zinc-200">{hostKeyPrompt.fingerprint}</span>
-            </div>
-            {hostKeyPrompt.kind === "mismatch" && hostKeyPrompt.oldFingerprint && (
-              <div className="text-xs font-mono text-zinc-500 mt-1 break-all">
-                previously trusted: {hostKeyPrompt.oldFingerprint}
-              </div>
-            )}
-            <div className="flex justify-end gap-2 mt-4">
-              <button
-                onClick={() => setHostKeyPrompt(null)}
-                className="px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={acceptHostKey}
-                className={`px-4 py-2 text-sm text-white rounded-lg transition cursor-pointer ${hostKeyPrompt.kind === "mismatch" ? "bg-red-600 hover:bg-red-500" : "bg-blue-600 hover:bg-blue-500"}`}
-              >
-                {hostKeyPrompt.kind === "mismatch" ? "Trust new key" : "Trust & connect"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {hostKeyModal}
 
       {/* Main content area */}
       <div className="flex-1 flex min-h-0">
