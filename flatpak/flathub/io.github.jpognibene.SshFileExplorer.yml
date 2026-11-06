@@ -33,6 +33,11 @@ build-options:
   append-path: /usr/lib/sdk/node20/bin:/usr/lib/sdk/rust-stable/bin
   env:
     CARGO_HOME: /run/build/ssh-file-explorer/cargo
+    # Point npm and tool caches at the offline stores populated by
+    # node-sources.json (module build dir is /run/build/<module name>).
+    XDG_CACHE_HOME: /run/build/ssh-file-explorer/flatpak-node/cache
+    npm_config_cache: /run/build/ssh-file-explorer/flatpak-node/npm-cache
+    npm_config_offline: 'true'
 
 modules:
   - name: ssh-file-explorer
@@ -40,8 +45,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/JPOgnibene/SSH-File-Explorer-for-Linux.git
-        tag: v1.2.0
-        # commit: <REQUIRED by Flathub — the exact SHA that v1.2.0 points to>
+        tag: v1.2.4
+        commit: 7f4c1ba3593ca2a9b6d721abac021586cd02d686
 
       # Generated offline dependency lists — produced by the tools in
       # ../FLATHUB.md. Keep these regenerated whenever the lockfiles change.
