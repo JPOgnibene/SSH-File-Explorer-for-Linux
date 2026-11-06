@@ -45,8 +45,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/JPOgnibene/SSH-File-Explorer-for-Linux.git
-        tag: v1.2.0
-        commit: ce83284c78c57bd9d6e9d0f0ddd65b3e1baebaca
+        tag: v1.2.4
+        commit: 7f4c1ba3593ca2a9b6d721abac021586cd02d686
 
       # Generated offline dependency lists — produced by the tools in
       # ../FLATHUB.md. Keep these regenerated whenever the lockfiles change.
